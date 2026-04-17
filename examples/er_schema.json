@@ -1,0 +1,32 @@
+{
+  "tables": [
+    {
+      "name": "departments",
+      "columns": [
+        {"name": "id", "type": "INT", "primary_key": true},
+        {"name": "name", "type": "VARCHAR(80)", "unique": true, "not_null": true}
+      ]
+    },
+    {
+      "name": "employees",
+      "columns": [
+        {"name": "id", "type": "INT", "primary_key": true},
+        {"name": "department_id", "type": "INT", "not_null": true, "references": "departments.id"},
+        {"name": "email", "type": "VARCHAR(120)", "unique": true, "not_null": true},
+        {"name": "full_name", "type": "VARCHAR(120)", "not_null": true}
+      ]
+    },
+    {
+      "name": "projects",
+      "columns": [
+        {"name": "id", "type": "INT", "primary_key": true},
+        {"name": "owner_id", "type": "INT", "references": "employees.id"},
+        {"name": "code", "type": "VARCHAR(30)", "unique": true, "not_null": true}
+      ]
+    }
+  ],
+  "relations": [
+    {"from": "employees.department_id", "to": "departments.id"},
+    {"from": "projects.owner_id", "to": "employees.id"}
+  ]
+}
