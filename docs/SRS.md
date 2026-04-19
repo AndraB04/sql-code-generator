@@ -40,3 +40,42 @@ Aplicatia SQL Code Generator primeste o descriere ER in format JSON, genereaza c
 - Formatul ER acceptat este JSON-ul documentat in `examples/er_schema.json`.
 - Parserul SQL este orientat pe `INSERT INTO ... VALUES ...`, nu pe intreg dialectul PostgreSQL.
 - Stocarea demonstrativa din shared memory foloseste limite fixe: 32 tabele, 32 coloane/tabel si 1024 randuri/tabel.
+
+## 6. CLI si variabile de mediu
+
+Clientul accepta argumente:
+
+--config <fisier_config>  
+--input <fisier_json>  
+--mode <operatie>  
+
+Serverul poate folosi variabile de mediu:
+
+SERVER_PORT  
+ADMIN_PORT  
+CONFIG_PATH  
+
+## 7. Exemplu input/output
+
+### Input
+
+```json
+{
+  "tables": [
+    {
+      "name": "users",
+      "columns": [
+        {"name": "id", "type": "INT", "pk": true},
+        {"name": "name", "type": "TEXT"}
+      ]
+    }
+  ]
+}
+```
+### Output
+```sql
+CREATE TABLE users (
+  id INT PRIMARY KEY,
+  name TEXT
+);
+```
