@@ -158,11 +158,13 @@ Procesul parinte:
 
 ## 7. Configurare (libconfig)
 
-Serverul foloseste `libconfig` pentru:
+Serverul foloseste libconfig pentru configurarea porturilor si a timeout-ului admin.
 
-- configurarea porturilor
-- limitele sistemului
-- timeout-ul conexiunii admin
+In cazul in care fisierul de configurare lipseste, serverul foloseste valori implicite definite in cod.
+
+Porturile pot fi suprascrise si prin variabile de mediu:
+- SERVER_PORT
+- ADMIN_PORT
 
 ## 8. Administrare
 
