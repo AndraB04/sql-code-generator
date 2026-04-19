@@ -1,6 +1,6 @@
 CC=gcc
 CFLAGS=-g -Wall -Wextra -std=c11 -D_DEFAULT_SOURCE -Iinclude
-LDFLAGS=-pthread
+LDFLAGS=-pthread -lconfig
 NCURSES_LIBS=-lncurses -ltinfo
 
 COMMON=src/protocol.c src/model.c
