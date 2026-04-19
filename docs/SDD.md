@@ -52,12 +52,10 @@ Campurile sunt trimise in network byte order. Payload-ul poate fi text sau bytes
 - Dimensiunea este data de `msg_size`
 - Nu exista delimitatori suplimentari
 
-### Coduri flags
+### Statusul raspunsului este indicat prin op_id:
 
-- 0 = succes
-- 1 = eroare validare
-- 2 = eroare protocol
-- 3 = eroare interna
+- OP_OK = succes
+- OP_ERROR = eroare
 
 ### Exemple mesaje
 
