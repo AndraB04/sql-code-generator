@@ -45,7 +45,92 @@ Campurile sunt trimise in network byte order. Payload-ul poate fi text sau bytes
 - `OP_VALIDATE_INSERT`: valideaza si aplica batch insert.
 - `OP_ADMIN_LOGIN`, `OP_ADMIN_REPORT`, `OP_ADMIN_BYE`: administrare.
 
-## 4. Validare inserturi
+### Format payload
+
+- Encoding: UTF-8 pentru text
+- Fisierele sunt transmise chunked (bytes)
+- Dimensiunea este data de `msg_size`
+- Nu exista delimitatori suplimentari
+
+### Coduri flags
+
+- 0 = succes
+- 1 = eroare validare
+- 2 = eroare protocol
+- 3 = eroare interna
+
+### Exemple mesaje
+
+#### OP_CONNECT
+
+```C
+Request:
+msg_size = 0
+client_id = 0
+op_id = OP_CONNECT
+flags = 0
+
+Response:
+msg_size = 0
+client_id = 42
+op_id = OP_CONNECT
+flags = 0
+```
+
+#### OP_UPLOAD_CHUNK
+
+```c
+Request:
+msg_size = 512
+client_id = 42
+op_id = OP_UPLOAD_CHUNK
+flags = 0
+
+Payload:
+"bytes JSON"
+```
+
+#### OP_GENERATE_SQL
+
+```c
+Response:
+msg_size = N
+client_id = 42
+op_id = OP_GENERATE_SQL
+flags = 0
+
+Payload:
+"CREATE TABLE users (...);"
+```
+## 4. Fluxuri (FCE)
+
+### Upload ER
+
+1. Client trimite OP_UPLOAD_BEGIN  
+2. Server initializeaza buffer  
+3. Client trimite OP_UPLOAD_CHUNK (de mai multe ori)  
+4. Client trimite OP_UPLOAD_END  
+5. Server parseaza JSON si actualizeaza starea  
+6. Server trimite raspuns  
+
+### Generare SQL
+
+1. Client trimite OP_GENERATE_SQL  
+2. Server genereaza SQL  
+3. Server trimite rezultatul  
+
+### Insert
+
+1. Client trimite OP_VALIDATE_INSERT  
+2. Server pune cererea in coada FIFO  
+3. Worker thread extrage cererea  
+4. Server apeleaza fork()  
+5. Procesul copil valideaza  
+6. Parintele asteapta cu waitpid()  
+7. Daca valid → aplica in state  
+8. Server raspunde clientului  
+
+## 5. Validare inserturi
 
 Parserul accepta:
 
@@ -61,7 +146,27 @@ Pentru fiecare rand se verifica:
 - valorile `PRIMARY KEY` si `UNIQUE` nu exista deja si nu se repeta in acelasi batch;
 - foreign key-ul indica o valoare existenta in tabela referita sau intr-un rand validat anterior din acelasi batch.
 
-## 5. Administrare
+## 6. Procese
+
+Serverul foloseste `fork()` pentru validarea inserturilor si `waitpid()` pentru sincronizare.
+
+Procesele copil:
+- citesc starea partajata
+- nu modifica starea
+
+Procesul parinte:
+- asteapta finalizarea copilului
+- aplica modificarile daca validarea reuseste
+
+## 7. Configurare (libconfig)
+
+Serverul foloseste `libconfig` pentru:
+
+- configurarea porturilor
+- limitele sistemului
+- timeout-ul conexiunii admin
+
+## 8. Administrare
 
 Clientul admin este sincron si exclusiv. Serverul refuza al doilea admin cat timp primul este conectat. Daca adminul nu trimite comenzi timp de 60 de secunde, conexiunea este inchisa.
 
