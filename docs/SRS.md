@@ -45,15 +45,17 @@ Aplicatia SQL Code Generator primeste o descriere ER in format JSON, genereaza c
 
 Clientul accepta argumente:
 
---config <fisier_config>  
---input <fisier_json>  
---mode <operatie>  
+--input <fisier_json>
+
+Argumentele sunt procesate manual prin argv.
 
 Serverul poate folosi variabile de mediu:
 
+```c
 SERVER_PORT  
 ADMIN_PORT  
-CONFIG_PATH  
+CONFIG_PATH
+```
 
 ## 7. Exemplu input/output
 
@@ -79,3 +81,11 @@ CREATE TABLE users (
   name TEXT
 );
 ```
+
+### Config
+
+Configurarea aplicatiei se face prin:
+
+1. Fisier config.cfg (libconfig)
+2. Variabile de mediu (SERVER_PORT, ADMIN_PORT)
+3. Valori implicite hardcodate (fallback)
