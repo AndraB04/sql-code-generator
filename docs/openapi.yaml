@@ -1,0 +1,192 @@
+openapi: 3.0.3
+info:
+  title: SQL Code Generator API
+  version: "0.1.0"
+  description: >
+    Contract HTTP/WS planned over the binary TCP protocol implemented in
+    Milestone 1. The current C executables use MsgHeader/op_id messages; this
+    document specifies the equivalent Web Service surface for later extension.
+servers:
+  - url: http://localhost:8080
+paths:
+  /schemas:
+    post:
+      summary: Upload ER schema
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ErSchema"
+      responses:
+        "200":
+          description: Schema loaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "400":
+          description: Invalid schema
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /sql/generate:
+    post:
+      summary: Generate CREATE TABLE SQL from the currently loaded schema
+      responses:
+        "200":
+          description: Generated SQL
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - sql
+                properties:
+                  sql:
+                    type: string
+  /inserts/validate:
+    post:
+      summary: Validate and apply an INSERT batch
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              example: "INSERT INTO departments (id, name) VALUES (1, 'Engineering');"
+      responses:
+        "200":
+          description: Batch accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "409":
+          description: Constraint violation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /admin/reports/{category}:
+    get:
+      summary: Read an administrative report
+      parameters:
+        - name: category
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - clients
+              - commands
+              - avg
+              - history
+              - tables
+              - queue
+      responses:
+        "200":
+          description: Text report
+          content:
+            text/plain:
+              schema:
+                type: string
+  /ws/protocol:
+    get:
+      summary: WebSocket endpoint mirroring the binary TCP operations
+      description: >
+        A future WebSocket transport can send JSON messages containing op_id,
+        client_id, flags and payload. The op_id values match include/protocol.h.
+      responses:
+        "101":
+          description: WebSocket upgrade
+components:
+  schemas:
+    ErSchema:
+      type: object
+      required:
+        - tables
+      properties:
+        tables:
+          type: array
+          items:
+            $ref: "#/components/schemas/Table"
+        relations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Relation"
+    Table:
+      type: object
+      required:
+        - name
+        - columns
+      properties:
+        name:
+          type: string
+          example: employees
+        columns:
+          type: array
+          items:
+            $ref: "#/components/schemas/Column"
+    Column:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          example: id
+        type:
+          type: string
+          default: TEXT
+          example: INT
+        primary_key:
+          type: boolean
+          default: false
+        unique:
+          type: boolean
+          default: false
+        not_null:
+          type: boolean
+          default: false
+        references:
+          type: string
+          description: Qualified referenced column in table.column format.
+          example: departments.id
+    Relation:
+      type: object
+      required:
+        - from
+        - to
+      properties:
+        from:
+          type: string
+          example: employees.department_id
+        to:
+          type: string
+          example: departments.id
+    StatusResponse:
+      type: object
+      required:
+        - ok
+        - message
+      properties:
+        ok:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "OK: inserted 3 row(s)"
+    ErrorResponse:
+      type: object
+      required:
+        - ok
+        - error
+      properties:
+        ok:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "constraint failed: duplicate value for employees.email"

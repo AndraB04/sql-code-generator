@@ -11,14 +11,26 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
+#ifdef HAVE_LIBCONFIG
+#include <libconfig.h>
+#endif
+
 #define MAX_FDS 256
-#define ADMIN_TIMEOUT_SEC 60
+#define DEFAULT_ADMIN_TIMEOUT_SEC 60
+
+typedef struct {
+    uint16_t server_port;
+    uint16_t admin_port;
+    int admin_timeout_sec;
+    char config_path[256];
+} RuntimeConfig;
 
 typedef struct Request {
     int fd;
@@ -38,6 +50,169 @@ typedef struct {
 
 static SharedState *g_state;
 static RequestQueue g_queue;
+static RuntimeConfig g_cfg;
+
+static void print_usage(const char *prog) {
+    fprintf(stderr,
+            "Usage: %s [-c config.cfg] [-p server_port] [-a admin_port] [-t admin_timeout]\n",
+            prog);
+}
+
+static int parse_number(const char *value, long min, long max, long *out) {
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed < min || parsed > max) {
+        return -1;
+    }
+    *out = parsed;
+    return 0;
+}
+
+static void apply_port_value(const char *label, const char *value, uint16_t *target) {
+    long parsed = 0;
+    if (parse_number(value, 1, 65535, &parsed) == 0) {
+        *target = (uint16_t)parsed;
+    } else {
+        fprintf(stderr, "Ignoring invalid %s value '%s'\n", label, value);
+    }
+}
+
+static void apply_timeout_value(const char *label, const char *value, int *target) {
+    long parsed = 0;
+    if (parse_number(value, 1, 86400, &parsed) == 0) {
+        *target = (int)parsed;
+    } else {
+        fprintf(stderr, "Ignoring invalid %s value '%s'\n", label, value);
+    }
+}
+
+static void cfg_defaults(RuntimeConfig *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->server_port = SQLCG_PORT;
+    cfg->admin_port = SQLCG_ADMIN_PORT;
+    cfg->admin_timeout_sec = DEFAULT_ADMIN_TIMEOUT_SEC;
+    snprintf(cfg->config_path, sizeof(cfg->config_path), "config.cfg");
+}
+
+static void cfg_read_config_path(RuntimeConfig *cfg, int argc, char **argv) {
+    const char *env_path = getenv("CONFIG_PATH");
+    if (env_path != NULL && env_path[0] != '\0') {
+        snprintf(cfg->config_path, sizeof(cfg->config_path), "%s", env_path);
+    }
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--config") == 0) && i + 1 < argc) {
+            snprintf(cfg->config_path, sizeof(cfg->config_path), "%s", argv[++i]);
+        }
+    }
+}
+
+static void cfg_load_file(RuntimeConfig *cfg) {
+#ifdef HAVE_LIBCONFIG
+    config_t file_cfg;
+    config_init(&file_cfg);
+    if (!config_read_file(&file_cfg, cfg->config_path)) {
+        fprintf(stderr, "Config fallback: cannot read %s:%d - %s\n",
+                cfg->config_path, config_error_line(&file_cfg), config_error_text(&file_cfg));
+        config_destroy(&file_cfg);
+        return;
+    }
+
+    int value = 0;
+    if (config_lookup_int(&file_cfg, "server.port", &value) && value > 0 && value <= 65535) {
+        cfg->server_port = (uint16_t)value;
+    }
+    if (config_lookup_int(&file_cfg, "server.admin_port", &value) && value > 0 && value <= 65535) {
+        cfg->admin_port = (uint16_t)value;
+    }
+    if (config_lookup_int(&file_cfg, "server.admin_timeout", &value) && value > 0) {
+        cfg->admin_timeout_sec = value;
+    }
+    config_destroy(&file_cfg);
+#else
+    FILE *f = fopen(cfg->config_path, "r");
+    if (f == NULL) {
+        fprintf(stderr, "Config fallback: cannot read %s - %s\n", cfg->config_path, strerror(errno));
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *eq = strchr(line, '=');
+        if (eq == NULL) {
+            continue;
+        }
+        eq++;
+        while (*eq == ' ' || *eq == '\t') {
+            eq++;
+        }
+        char value[64];
+        size_t len = strcspn(eq, "; \t\r\n");
+        if (len == 0 || len >= sizeof(value)) {
+            continue;
+        }
+        memcpy(value, eq, len);
+        value[len] = '\0';
+
+        if (strstr(line, "admin_port") != NULL) {
+            apply_port_value("server.admin_port", value, &cfg->admin_port);
+        } else if (strstr(line, "admin_timeout") != NULL) {
+            apply_timeout_value("server.admin_timeout", value, &cfg->admin_timeout_sec);
+        } else if (strstr(line, "port") != NULL) {
+            apply_port_value("server.port", value, &cfg->server_port);
+        }
+    }
+    fclose(f);
+#endif
+}
+
+static void cfg_apply_env(RuntimeConfig *cfg) {
+    const char *server_port = getenv("SERVER_PORT");
+    const char *admin_port = getenv("ADMIN_PORT");
+    const char *admin_timeout = getenv("ADMIN_TIMEOUT");
+    if (server_port != NULL) {
+        apply_port_value("SERVER_PORT", server_port, &cfg->server_port);
+    }
+    if (admin_port != NULL) {
+        apply_port_value("ADMIN_PORT", admin_port, &cfg->admin_port);
+    }
+    if (admin_timeout != NULL) {
+        apply_timeout_value("ADMIN_TIMEOUT", admin_timeout, &cfg->admin_timeout_sec);
+    }
+}
+
+static int cfg_apply_args(RuntimeConfig *cfg, int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--config") == 0) {
+            i++;
+        } else if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
+            const char *option = argv[i++];
+            apply_port_value(option, argv[i], &cfg->server_port);
+        } else if ((strcmp(argv[i], "-a") == 0 || strcmp(argv[i], "--admin-port") == 0) && i + 1 < argc) {
+            const char *option = argv[i++];
+            apply_port_value(option, argv[i], &cfg->admin_port);
+        } else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--admin-timeout") == 0) && i + 1 < argc) {
+            const char *option = argv[i++];
+            apply_timeout_value(option, argv[i], &cfg->admin_timeout_sec);
+        } else {
+            print_usage(argv[0]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int cfg_load(RuntimeConfig *cfg, int argc, char **argv) {
+    cfg_defaults(cfg);
+    cfg_read_config_path(cfg, argc, argv);
+    cfg_load_file(cfg);
+    cfg_apply_env(cfg);
+    return cfg_apply_args(cfg, argc, argv);
+}
 
 static long now_ms(void) {
     struct timeval tv;
@@ -365,8 +540,21 @@ static void handle_admin_message(int fd, int *admin_fd, long *admin_last, MsgHea
     respond_text(fd, 0, OP_ERROR, "unknown admin operation");
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+
+    int cfg_status = cfg_load(&g_cfg, argc, argv);
+    if (cfg_status > 0) {
+        return 0;
+    }
+    if (cfg_status < 0) {
+        return 1;
+    }
+
+    if (mkdir("data", 0775) < 0 && errno != EEXIST) {
+        perror("mkdir data");
+        return 1;
+    }
 
     g_state = mmap(NULL, sizeof(SharedState), PROT_READ | PROT_WRITE,
                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -377,8 +565,8 @@ int main(void) {
     state_init(g_state);
     queue_init(&g_queue);
 
-    int listen_fd = listen_tcp(SQLCG_PORT);
-    int admin_listen_fd = listen_tcp(SQLCG_ADMIN_PORT);
+    int listen_fd = listen_tcp(g_cfg.server_port);
+    int admin_listen_fd = listen_tcp(g_cfg.admin_port);
     if (listen_fd < 0 || admin_listen_fd < 0) {
         return 1;
     }
@@ -393,8 +581,10 @@ int main(void) {
     int admin_fd = -1;
     long admin_last = 0;
 
-    fprintf(stderr, "sql-code-generator server listening on %d, admin on %d\n",
-            SQLCG_PORT, SQLCG_ADMIN_PORT);
+    fprintf(stderr,
+            "sql-code-generator server listening on %u, admin on %u, timeout %ds, config %s\n",
+            (unsigned)g_cfg.server_port, (unsigned)g_cfg.admin_port, g_cfg.admin_timeout_sec,
+            g_cfg.config_path);
 
     for (;;) {
         int rc = poll(fds, nfds, 1000);
@@ -406,7 +596,7 @@ int main(void) {
             break;
         }
 
-        if (admin_fd > 0 && time(NULL) - admin_last > ADMIN_TIMEOUT_SEC) {
+        if (admin_fd > 0 && time(NULL) - admin_last > g_cfg.admin_timeout_sec) {
             for (int i = 0; i < nfds; i++) {
                 if (fds[i].fd == admin_fd) {
                     remove_pollfd(fds, &nfds, i);

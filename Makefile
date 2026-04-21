@@ -1,6 +1,11 @@
 CC=gcc
 CFLAGS=-g -Wall -Wextra -std=c11 -D_DEFAULT_SOURCE -Iinclude
-LDFLAGS=-pthread -lconfig
+LIBCONFIG_CFLAGS=$(shell pkg-config --cflags libconfig 2>/dev/null)
+LIBCONFIG_LIBS=$(shell pkg-config --libs libconfig 2>/dev/null)
+ifneq ($(strip $(LIBCONFIG_LIBS)),)
+CFLAGS+=-DHAVE_LIBCONFIG $(LIBCONFIG_CFLAGS)
+endif
+LDFLAGS=-pthread $(LIBCONFIG_LIBS)
 NCURSES_LIBS=-lncurses -ltinfo
 
 COMMON=src/protocol.c src/model.c

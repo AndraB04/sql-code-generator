@@ -1,30 +1,49 @@
 # Software Design Description
 
-## 1. Arhitectura
+## 1. Arhitectura Generala
 
 Sistemul are trei executabile:
 
-- `server`: proces UNIX C care mentine starea si proceseaza cereri.
-- `client`: client ordinar CLI pentru upload, generare SQL si inserturi.
+- `server`: proces UNIX C care mentine starea, accepta conexiuni si proceseaza cereri.
+- `client`: CLI pentru upload schema ER, generare SQL si validare inserturi.
 - `admin`: client ncurses pentru rapoarte administrative.
 
-Serverul foloseste doua socket-uri TCP. Socket-ul ordinar si socket-ul admin sunt multiplexate cu `poll`. Cererile clientilor ordinari sunt puse intr-o coada FIFO comuna. Un thread worker scoate cererile din coada si raspunde sincron clientului.
+Serverul expune doua socket-uri TCP:
 
-## 2. Stare partajata
+- portul ordinar pentru clienti care trimit scheme si inserturi;
+- portul admin pentru rapoarte.
 
-Structura `SharedState` este alocata cu `mmap(..., MAP_SHARED | MAP_ANONYMOUS, ...)`. Ea contine:
+Ambele socket-uri si conexiunile active sunt multiplexate cu `poll`. Cererile clientilor ordinari sunt puse intr-o coada FIFO comuna. Un thread worker scoate cererile din coada si trimite raspunsul sincron catre clientul care a initiat cererea.
 
-- lista de tabele si coloane;
-- randurile acceptate pentru validare ulterioara;
+## 2. Module
+
+- `src/protocol.c`: conectare TCP, listen TCP, citire/scriere completa si serializare mesaje.
+- `src/model.c`: model ER, parser JSON minimal, generator SQL, parser/validator `INSERT`, rapoarte admin.
+- `src/server.c`: socket-uri, `poll`, coada FIFO, thread worker, configurare libconfig, `fork`/`waitpid`.
+- `src/client.c`: comenzi interactive si demo neinteractiv.
+- `src/admin_client.c`: UI ncurses pentru rapoarte.
+
+## 3. Stare Partajata
+
+`SharedState` este alocata cu:
+
+```c
+mmap(NULL, sizeof(SharedState), PROT_READ | PROT_WRITE,
+     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+```
+
+Structura contine:
+
+- tabele, coloane si randuri acceptate;
 - clienti conectati;
 - contori de comenzi;
 - istoric circular;
 - adancimea cozii;
-- indicatorul de admin conectat.
+- starea conexiunii admin.
 
-Procesele copil create pentru inserturi citesc aceeasi stare partajata. Ele nu modifica starea. Daca validarea este reusita, parintele aplica batch-ul in `SharedState`.
+Procesele copil create pentru validarea inserturilor citesc aceeasi stare partajata. Copilul nu modifica starea; doar intoarce rezultatul validarii prin pipe. Parintele aplica batch-ul numai daca validarea copilului reuseste.
 
-## 3. Protocol
+## 4. Protocol
 
 Header-ul este fix:
 
@@ -37,98 +56,55 @@ typedef struct {
 } MsgHeader;
 ```
 
-Campurile sunt trimise in network byte order. Payload-ul poate fi text sau bytes de fisier. Operatii principale:
+Campurile sunt trimise in network byte order. Payload-ul are lungimea `msg_size` si nu foloseste delimitatori suplimentari.
 
-- `OP_CONNECT`: aloca id client.
-- `OP_UPLOAD_BEGIN`, `OP_UPLOAD_CHUNK`, `OP_UPLOAD_END`: transfer ER.
-- `OP_GENERATE_SQL`: returneaza SQL generat.
-- `OP_VALIDATE_INSERT`: valideaza si aplica batch insert.
-- `OP_ADMIN_LOGIN`, `OP_ADMIN_REPORT`, `OP_ADMIN_BYE`: administrare.
+Operatii:
 
-### Format payload
+- `OP_CONNECT = 0`
+- `OP_BYE = 5`
+- `OP_UPLOAD_BEGIN = 10`
+- `OP_UPLOAD_CHUNK = 11`
+- `OP_UPLOAD_END = 12`
+- `OP_GENERATE_SQL = 20`
+- `OP_VALIDATE_INSERT = 30`
+- `OP_OK = 40`
+- `OP_ERROR = 41`
+- `OP_ADMIN_LOGIN = 100`
+- `OP_ADMIN_REPORT = 101`
+- `OP_ADMIN_BYE = 105`
 
-- Encoding: UTF-8 pentru text
-- Fisierele sunt transmise chunked (bytes)
-- Dimensiunea este data de `msg_size`
-- Nu exista delimitatori suplimentari
-
-### Statusul raspunsului este indicat prin op_id:
-
-- OP_OK = succes
-- OP_ERROR = eroare
-
-### Exemple mesaje
-
-#### OP_CONNECT
-
-```C
-Request:
-msg_size = 0
-client_id = 0
-op_id = OP_CONNECT
-flags = 0
-
-Response:
-msg_size = 0
-client_id = 42
-op_id = OP_CONNECT
-flags = 0
-```
-
-#### OP_UPLOAD_CHUNK
-
-```c
-Request:
-msg_size = 512
-client_id = 42
-op_id = OP_UPLOAD_CHUNK
-flags = 0
-
-Payload:
-"bytes JSON"
-```
-
-#### OP_GENERATE_SQL
-
-```c
-Response:
-msg_size = N
-client_id = 42
-op_id = OP_GENERATE_SQL
-flags = 0
-
-Payload:
-"CREATE TABLE users (...);"
-```
-## 4. Fluxuri (FCE)
+## 5. Fluxuri Interne
 
 ### Upload ER
 
-1. Client trimite OP_UPLOAD_BEGIN  
-2. Server initializeaza buffer  
-3. Client trimite OP_UPLOAD_CHUNK (de mai multe ori)  
-4. Client trimite OP_UPLOAD_END  
-5. Server parseaza JSON si actualizeaza starea  
-6. Server trimite raspuns  
+1. Clientul cere `OP_UPLOAD_BEGIN`.
+2. Serverul creeaza `data/upload_<client_id>.schema.json`.
+3. Clientul trimite chunk-uri de maxim `64 KB`.
+4. Serverul append-uie fiecare chunk.
+5. La `OP_UPLOAD_END`, serverul parseaza fisierul si reseteaza modelul curent.
 
 ### Generare SQL
 
-1. Client trimite OP_GENERATE_SQL  
-2. Server genereaza SQL  
-3. Server trimite rezultatul  
+Generatorul parcurge tabelele din `SharedState` si construieste instructiuni `CREATE TABLE`. Constraint-urile sunt scrise inline pe coloane:
 
-### Insert
+- `PRIMARY KEY`;
+- `NOT NULL`;
+- `UNIQUE`;
+- `REFERENCES table(column)`.
 
-1. Client trimite OP_VALIDATE_INSERT  
-2. Server pune cererea in coada FIFO  
-3. Worker thread extrage cererea  
-4. Server apeleaza fork()  
-5. Procesul copil valideaza  
-6. Parintele asteapta cu waitpid()  
-7. Daca valid → aplica in state  
-8. Server raspunde clientului  
+### Validare Insert
 
-## 5. Validare inserturi
+1. Worker-ul primeste `OP_VALIDATE_INSERT`.
+2. Incrementeaza contorul de inserturi.
+3. Creeaza pipe si proces copil.
+4. Copilul parseaza batch-ul si verifica toate constrangerile.
+5. Copilul scrie statusul in pipe si iese cu `_exit`.
+6. Parintele asteapta cu `waitpid`.
+7. Parintele ruleaza din nou parsarea/aplicarea in procesul principal, pentru a modifica starea comuna.
+
+Acest design separa validarea demonstrativa in proces copil, dar pastreaza mutatiile in parinte, evitand modificari accidentale facute de copil.
+
+## 6. Validare Inserturi
 
 Parserul accepta:
 
@@ -136,45 +112,74 @@ Parserul accepta:
 INSERT INTO table (col1, col2) VALUES (v1, v2), (v3, v4);
 ```
 
-Pentru fiecare rand se verifica:
+Se verifica:
 
 - tabela exista;
 - coloanele exista;
-- coloanele `NOT NULL` si `PRIMARY KEY` nu primesc `NULL`;
-- valorile `PRIMARY KEY` si `UNIQUE` nu exista deja si nu se repeta in acelasi batch;
+- numarul de coloane corespunde cu numarul de valori;
+- `NOT NULL` si `PRIMARY KEY` nu primesc `NULL`;
+- `PRIMARY KEY` si `UNIQUE` nu se repeta in starea existenta sau in acelasi batch;
 - foreign key-ul indica o valoare existenta in tabela referita sau intr-un rand validat anterior din acelasi batch.
 
-## 6. Procese
+## 7. Configurare
 
-Serverul foloseste `fork()` pentru validarea inserturilor si `waitpid()` pentru sincronizare.
+Serverul integreaza libconfig. Valorile sunt incarcate in `RuntimeConfig`.
 
-Procesele copil:
-- citesc starea partajata
-- nu modifica starea
+Ordinea de precedenta:
 
-Procesul parinte:
-- asteapta finalizarea copilului
-- aplica modificarile daca validarea reuseste
+1. valori implicite: `SQLCG_PORT`, `SQLCG_ADMIN_PORT`, `60`;
+2. fisier libconfig, implicit `config.cfg`;
+3. variabile de mediu: `CONFIG_PATH`, `SERVER_PORT`, `ADMIN_PORT`, `ADMIN_TIMEOUT`;
+4. argumente CLI: `--config`, `--port`, `--admin-port`, `--admin-timeout`.
 
-## 7. Configurare (libconfig)
+Daca fisierul de configurare lipseste sau nu poate fi citit, serverul afiseaza un mesaj de fallback si continua cu valorile disponibile.
 
-Serverul foloseste libconfig pentru configurarea porturilor si a timeout-ului admin.
-
-In cazul in care fisierul de configurare lipseste, serverul foloseste valori implicite definite in cod.
-
-Porturile pot fi suprascrise si prin variabile de mediu:
-- SERVER_PORT
-- ADMIN_PORT
+Makefile-ul activeaza calea libconfig cand `pkg-config` gaseste biblioteca si defineste `HAVE_LIBCONFIG`. Pentru sisteme de dezvoltare fara headerul `libconfig.h`, exista un parser de fallback limitat la cheile folosite in `config.cfg`, astfel incat restul demo-ului poate fi compilat si testat.
 
 ## 8. Administrare
 
-Clientul admin este sincron si exclusiv. Serverul refuza al doilea admin cat timp primul este conectat. Daca adminul nu trimite comenzi timp de 60 de secunde, conexiunea este inchisa.
+Clientul admin foloseste ncurses si cere rapoarte prin `OP_ADMIN_REPORT`.
 
-Rapoartele implementate sunt:
+Categorii implementate:
 
-- clienti conectati;
-- comenzi totale, inserturi si esecuri;
-- durata medie de executie;
-- istoric recent;
-- tabele incarcate si numar de randuri;
-- adancimea cozii.
+- `clients`: clienti ordinari conectati si idle time;
+- `commands`: comenzi totale, inserturi si esecuri;
+- `avg`: durata medie de executie;
+- `history`: istoric recent;
+- `tables`: tabele incarcate si numar de randuri;
+- `queue`: adancimea cozii FIFO.
+
+Serverul permite un singur admin conectat. Un al doilea admin primeste eroare pana cand primul se deconecteaza sau expira prin timeout.
+
+## 9. Specificatie Web/API
+
+Executabilul curent foloseste protocol TCP binar. `docs/openapi.yaml` documenteaza o interfata HTTP/WS echivalenta pentru etapa Web Service:
+
+- `POST /schemas` pentru incarcare schema;
+- `POST /sql/generate` pentru generare SQL;
+- `POST /inserts/validate` pentru validare insert;
+- `GET /admin/reports/{category}` pentru rapoarte;
+- `/ws/protocol` pentru mesaje WebSocket bazate pe aceleasi operatii.
+
+Aceasta separare pastreaza protocolul cerut pentru Milestone 1 si lasa clar contractul pentru extensia de nivel C.
+
+## 10. Calitate Si Verificare
+
+Build-ul foloseste:
+
+```make
+CFLAGS=-g -Wall -Wextra -std=c11 -D_DEFAULT_SOURCE -Iinclude
+LDFLAGS=-pthread -lconfig
+```
+
+Demo recomandat:
+
+```sh
+make
+./server
+./client --input examples/er_schema.json --generate --insert-file examples/inserts_ok.sql --no-repl
+./client --input examples/er_schema.json --insert-file examples/inserts_fail_fk.sql --no-repl
+./admin
+```
+
+Pentru clang-tidy/build warnings, codul este tinut fara dependinte de limbaje auxiliare si fara comentarii decorative. Comentariile se adauga doar unde o decizie de proiectare nu este evidenta din cod.
