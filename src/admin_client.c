@@ -188,3 +188,57 @@ int main(int argc, char **argv) {
 
     return 0;
 }
+
+
+/* 
+./admin
+
+SQL Code Generator Admin
+
+1 clients   2 commands   3 avg time   4 history   5 tables   6 queue   q quit
+--------------------------------------------------------------------------------
+1.
+Connected ordinary clients: 1
+client=9 fd=6 addr=client idle=2s
+
+2.
+Total commands: 35
+Insert commands: 14
+Failed commands: 9
+
+3.
+Average execution time: 1 ms
+
+4.
+Recent history:
+client connected
+generate sql
+insert rejected
+client connected
+upload begin
+schema loaded
+generate sql
+insert accepted
+client connected
+upload begin
+schema loaded
+generate sql
+insert accepted
+insert rejected
+insert rejected
+insert rejected
+upload begin
+schema loaded
+generate sql
+
+5.
+Tables loaded: 3
+departments: 2 columns, 2 rows
+employees: 4 columns, 1 rows
+projects: 3 columns, 1 rows
+
+6.
+Ordinary request queue depth: 0
+
+
+*/

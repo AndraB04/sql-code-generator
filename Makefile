@@ -59,3 +59,5 @@ run-server: server
 clean:
 	rm -f server client admin
 	rm -f data/upload_*.schema.json
+
+# rularea se face cu make all

@@ -422,3 +422,138 @@ int main(int argc, char **argv) {
     close(fd);
     return 0;
 }
+
+
+/*
+./client          
+Connected as client 1
+Commands:
+  upload <schema.json>
+  generate
+  insert <INSERT INTO ...>
+  insertfile <batch.sql>
+  quit
+sqlcg> upload er_schema.json
+cannot open er_schema.json: No such file or directory
+sqlcg> upload examples/er_Schema.json
+cannot open examples/er_Schema.json: No such file or directory
+sqlcg> generate
+-- No ER diagram loaded.
+
+sqlcg> insertfile examples/er_schema.json
+ERROR: no ER diagram loaded
+sqlcg> inserfile examples/inserts_ok.sql
+Commands:
+  upload <schema.json>
+  generate
+  insert <INSERT INTO ...>
+  insertfile <batch.sql>
+  quit
+sqlcg> insertfile examples/inserts_ok.sql
+ERROR: constraint failed: duplicate value for departments.id
+sqlcg> upload examples/er_schema.json
+OK: upload started
+OK: loaded 3 tables
+sqlcg> genereate
+Commands:
+  upload <schema.json>
+  generate
+  insert <INSERT INTO ...>
+  insertfile <batch.sql>
+  quit
+sqlcg> generate
+CREATE TABLE departments (
+    id INT PRIMARY KEY,
+    name VARCHAR(80) NOT NULL UNIQUE
+);
+
+CREATE TABLE employees (
+    id INT PRIMARY KEY,
+    department_id INT NOT NULL REFERENCES departments(id),
+    email VARCHAR(120) NOT NULL UNIQUE,
+    full_name VARCHAR(120) NOT NULL
+);
+
+CREATE TABLE projects (
+    id INT PRIMARY KEY,
+    owner_id INT REFERENCES employees(id),
+    code VARCHAR(30) NOT NULL UNIQUE
+);
+
+
+sqlcg> insertfile examples/inserts_ok.sql
+OK: inserted 4 row(s)
+sqlcg> insertfile examples/inserts_fail_fk.sql
+ERROR: constraint failed: foreign key employees.department_id references missing departments.id=999
+sqlcg> insertfile examples/inserts_fail_unique.sql
+ERROR: constraint failed: duplicate value for departments.id
+sqlcg> quit
+bye
+
+bash-5.3$ ./client --help
+Usage: ./client [host] [--host host] [--port port] [--input schema.json]
+          [--generate] [--insert-file batch.sql] [--no-repl]
+bash-5.3$ ./client --host 127.0.0.1 --port 19081 --input examples/er_schema.json --generate --insert-file examples/inserts_ok.sql --no-repl
+cannot connect to 127.0.0.1:19081
+bash-5.3$ <^?./client --host 127.0.0.1 --port 18081 --input examples/er_schema.json --generate --insert-file examples/inserts_ok.sql --no-repl
+                                                          
+bash: ./client: No such file or directory
+bash-5.3$ ./client --host 127.0.0.1 --port 18081 --input examples/er_schema.json --generate --insert-file examples/inserts_ok.sql --no-repl
+Connected as client 4
+OK: upload started
+OK: loaded 3 tables
+CREATE TABLE departments (
+    id INT PRIMARY KEY,
+    name VARCHAR(80) NOT NULL UNIQUE
+);
+
+CREATE TABLE employees (
+    id INT PRIMARY KEY,
+    department_id INT NOT NULL REFERENCES departments(id),
+    email VARCHAR(120) NOT NULL UNIQUE,
+    full_name VARCHAR(120) NOT NULL
+);
+
+CREATE TABLE projects (
+    id INT PRIMARY KEY,
+    owner_id INT REFERENCES employees(id),
+    code VARCHAR(30) NOT NULL UNIQUE
+);
+
+
+OK: inserted 4 row(s)
+bye
+bash-5.3$ ./client 127.0.0.1 --input examples/er_schema.json --generate --insert-file examples/inserts_ok.sql --no-repl
+Connected as client 5
+OK: upload started
+OK: loaded 3 tables
+CREATE TABLE departments (
+    id INT PRIMARY KEY,
+    name VARCHAR(80) NOT NULL UNIQUE
+);
+
+CREATE TABLE employees (
+    id INT PRIMARY KEY,
+    department_id INT NOT NULL REFERENCES departments(id),
+    email VARCHAR(120) NOT NULL UNIQUE,
+    full_name VARCHAR(120) NOT NULL
+);
+
+CREATE TABLE projects (
+    id INT PRIMARY KEY,
+    owner_id INT REFERENCES employees(id),
+    code VARCHAR(30) NOT NULL UNIQUE
+);
+
+
+OK: inserted 4 row(s)
+bye
+bash-5.3$ ./client --host 127.0.0.1 --port 18081 --insert-file examples/inserts_fail_fk.sql --no-repl
+Connected as client 6
+ERROR: constraint failed: foreign key employees.department_id references missing departments.id=999
+bash-5.3$ ./client --host 127.0.0.1 --port 18081 --insert-file examples/inserts_fail_unique.sql --no-repl
+Connected as client 7
+ERROR: constraint failed: duplicate value for departments.id
+bash-5.3$ 
+
+*/

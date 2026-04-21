@@ -915,3 +915,20 @@ int main(int argc, char **argv) {
     close(admin_listen_fd);
     return 0;
 }
+
+/*
+./server 
+sql-code-generator server listening on 18081, admin on 18082, timeout 60s, config config.cfg
+ordinary client connected from 127.0.0.1
+admin client connected
+admin disconnected due to timeout
+ordinary client connected from 127.0.0.1
+ordinary client connected from 127.0.0.1
+ordinary client connected from 127.0.0.1
+ordinary client connected from 127.0.0.1
+ordinary client connected from 127.0.0.1
+ordinary client connected from 127.0.0.1
+ordinary client connected from 127.0.0.1
+admin client connected
+ordinary client connected from 127.0.0.1
+*/
