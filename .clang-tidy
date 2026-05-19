@@ -1,0 +1,25 @@
+Checks: >
+  -*,
+  clang-analyzer-core.*,
+  clang-analyzer-unix.*,
+  clang-analyzer-security.insecureAPI.*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-branch-clone,
+  cert-*,
+  concurrency-*,
+  -concurrency-mt-unsafe,
+  misc-*,
+  -misc-const-correctness,
+  -misc-include-cleaner,
+  performance-*,
+  portability-*,
+  readability-*,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-magic-numbers
+WarningsAsErrors: '*'
+HeaderFilterRegex: ''
+CheckOptions:
+  cert-err33-c.CheckedFunctions: '^::(accept|bind|connect|fork|getaddrinfo|listen|mkdir|mmap|open|pipe|poll|pthread_create|read|recv|setsockopt|socket|waitpid|write)$'

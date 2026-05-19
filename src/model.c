@@ -11,14 +11,19 @@
 
 #include "model.h"      /* structuri si constante pentru modelul de date */
 
+#include <cjson/cJSON.h> /* parser JSON extern cerut de tema */
+#include <pg_query.h>   /* parser SQL PostgreSQL extern cerut de tema */
+
 #include <ctype.h>      /* functii pentru testarea/manipularea caracterelor */
+#include <errno.h>      /* errno pentru erori de fisiere */
 #include <stdarg.h>     /* suport pentru functii cu numar variabil de argumente */
 #include <stdio.h>      /* functii standard de intrare/iesire */
 #include <stdlib.h>     /* alocare dinamica de memorie, conversii */
 #include <string.h>     /* functii pentru siruri si memorie */
 #include <time.h>       /* functii pentru timp calendaristic */
 
-#define MAX_BATCH_ROWS 256   /* numarul maxim de randuri acceptate intr-un batch INSERT */
+#define MAX_BATCH_ROWS 256       /* numarul maxim de randuri acceptate intr-un batch INSERT */
+#define MAX_ER_FILE_SIZE (1024L * 1024L)
 
 /* 
  * aceasta structura memoreaza un rand care trebuie inserat si tabelul
@@ -212,174 +217,6 @@ static int find_column(const Table *table, const char *name) {
 }
 
 /*
- * cauta in textul JSON cheia cu numele dat
- * functia construieste modelul "key" si il cauta ca text brut
- */
-static const char *find_key(const char *json, const char *key) {
-    char pattern[96];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    return strstr(json, pattern);
-}
-
-/*
- * extrage din textul JSON valoarea string asociata unei chei
- * de exemplu: "name": "users"
- */
-static int json_get_string(const char *json, const char *key, char *out, size_t out_len) {
-    const char *p = find_key(json, key);
-    if (p == NULL) {
-        return 0;
-    }
-
-    p = strchr(p, ':');
-    if (p == NULL) {
-        return 0;
-    }
-
-    p++;
-    p = skip_ws(p);
-
-    /* pentru string ne asteptam sa inceapa cu ghilimele duble */
-    if (*p != '"') {
-        return 0;
-    }
-
-    p++;
-    size_t n = 0;
-
-    while (*p != '\0' && *p != '"' && n + 1 < out_len) {
-        /* tratam secventele escape foarte simplu */
-        if (*p == '\\' && p[1] != '\0') {
-            p++;
-        }
-        out[n++] = *p++;
-    }
-
-    out[n] = '\0';
-    return *p == '"';
-}
-
-/*
- * extrage o valoare booleana asociata unei chei JSON
- * accepta atat true, cat si 1
- */
-static int json_get_bool(const char *json, const char *key) {
-    const char *p = find_key(json, key);
-    if (p == NULL) {
-        return 0;
-    }
-
-    p = strchr(p, ':');
-    if (p == NULL) {
-        return 0;
-    }
-
-    p = skip_ws(p + 1);
-    return strncmp(p, "true", 4) == 0 || strncmp(p, "1", 1) == 0;
-}
-
-/*
- * extrage un array JSON complet asociat unei chei
- * functia urmareste corect parantezele patrate si ignora continutul
- * din stringuri pentru a nu se opri gresit
- */
-static int json_extract_array(const char *json, const char *key, char *out, size_t out_len) {
-    const char *p = find_key(json, key);
-    if (p == NULL) {
-        return 0;
-    }
-
-    p = strchr(p, ':');
-    if (p == NULL) {
-        return 0;
-    }
-
-    p = strchr(p, '[');
-    if (p == NULL) {
-        return 0;
-    }
-
-    int depth = 0;      /* nivelul de imbricare al [] */
-    int in_string = 0;  /* indica daca suntem in interiorul unui string */
-    size_t n = 0;
-
-    for (; *p != '\0'; p++) {
-        char c = *p;
-
-        if (n + 1 < out_len) {
-            out[n++] = c;
-        }
-
-        if (c == '"' && (p == json || p[-1] != '\\')) {
-            in_string = !in_string;
-        }
-
-        if (!in_string) {
-            if (c == '[') {
-                depth++;
-            } else if (c == ']') {
-                depth--;
-                if (depth == 0) {
-                    out[n] = '\0';
-                    return 1;
-                }
-            }
-        }
-    }
-
-    return 0;
-}
-
-/*
- * extrage urmatorul obiect JSON de forma { ... } dintr-un array JSON
- * pozitia curenta este retinuta in *pos si este actualizata dupa fiecare obiect
- */
-static int next_object(const char *array_json, int *pos, char *out, size_t out_len) {
-    const char *p = array_json + *pos;
-
-    /* avansam pana la inceputul unui obiect */
-    while (*p != '\0' && *p != '{') {
-        p++;
-    }
-
-    if (*p == '\0') {
-        return 0;
-    }
-
-    int depth = 0;      /* nivelul de imbricare al acoladelor */
-    int in_string = 0;  /* daca ne aflam sau nu intr-un string */
-    size_t n = 0;
-    const char *start = p;
-
-    for (; *p != '\0'; p++) {
-        char c = *p;
-
-        if (n + 1 < out_len) {
-            out[n++] = c;
-        }
-
-        if (c == '"' && (p == start || p[-1] != '\\')) {
-            in_string = !in_string;
-        }
-
-        if (!in_string) {
-            if (c == '{') {
-                depth++;
-            } else if (c == '}') {
-                depth--;
-                if (depth == 0) {
-                    out[n] = '\0';
-                    *pos = (int)(p - array_json + 1);
-                    return 1;
-                }
-            }
-        }
-    }
-
-    return 0;
-}
-
-/*
  * separa un nume calificat de forma tabela.coloana in doua siruri:
  * partea din stanga si partea din dreapta punctului
  */
@@ -406,6 +243,116 @@ void state_init(SharedState *state) {
     memset(state, 0, sizeof(*state));
     state->started_at = time(NULL);
     state->next_client_id = 1;
+    state->next_job_id = 1;
+}
+
+/*
+ * citeste complet un fisier JSON in memorie pentru a fi pasat catre cJSON
+ */
+static char *read_json_file(const char *path, size_t *json_len, char *err, size_t err_len) {
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        set_err(err, err_len, "cannot open ER file");
+        return NULL;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        set_err(err, err_len, "cannot seek ER file");
+        return NULL;
+    }
+
+    errno = 0;
+    long len = ftell(f);
+    if (len < 0) {
+        int saved_errno = errno;
+        fclose(f);
+        snprintf(err, err_len, "cannot tell ER file size: %s", strerror(saved_errno));
+        return NULL;
+    }
+
+    if (len == 0 || len > MAX_ER_FILE_SIZE) {
+        fclose(f);
+        set_err(err, err_len, "ER file is empty or too large");
+        return NULL;
+    }
+
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        set_err(err, err_len, "cannot rewind ER file");
+        return NULL;
+    }
+
+    char *json = (char *)malloc((size_t)len + 1);
+    if (json == NULL) {
+        fclose(f);
+        set_err(err, err_len, "out of memory");
+        return NULL;
+    }
+
+    if (fread(json, 1, (size_t)len, f) != (size_t)len) {
+        free(json);
+        fclose(f);
+        set_err(err, err_len, "cannot read ER file");
+        return NULL;
+    }
+
+    fclose(f);
+    json[len] = '\0';
+    *json_len = (size_t)len;
+    return json;
+}
+
+/*
+ * copiaza o valoare string cJSON intr-un buffer fix
+ */
+static int cjson_copy_string(const cJSON *object, const char *key, char *out, size_t out_len) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (!cJSON_IsString(item) || item->valuestring == NULL) {
+        return 0;
+    }
+    snprintf(out, out_len, "%s", item->valuestring);
+    return 1;
+}
+
+/*
+ * citeste un boolean din cJSON, acceptand si forma numerica 0/1
+ */
+static int cjson_get_bool(const cJSON *object, const char *key) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (cJSON_IsBool(item)) {
+        return cJSON_IsTrue(item);
+    }
+    if (cJSON_IsNumber(item)) {
+        return item->valueint != 0;
+    }
+    return 0;
+}
+
+/*
+ * completeaza o coloana pe baza obiectului cJSON primit
+ */
+static int load_column_json(Column *column, const cJSON *column_json, char *err, size_t err_len) {
+    memset(column, 0, sizeof(*column));
+    if (!cjson_copy_string(column_json, "name", column->name, sizeof(column->name))) {
+        set_err(err, err_len, "column without name");
+        return -1;
+    }
+    if (!cjson_copy_string(column_json, "type", column->type, sizeof(column->type))) {
+        snprintf(column->type, sizeof(column->type), "TEXT");
+    }
+
+    column->primary_key = cjson_get_bool(column_json, "primary_key");
+    column->unique = cjson_get_bool(column_json, "unique");
+    column->not_null = cjson_get_bool(column_json, "not_null") || column->primary_key;
+
+    char ref[MAX_NAME * 2];
+    if (cjson_copy_string(column_json, "references", ref, sizeof(ref))) {
+        split_qualified(ref,
+                        column->ref_table, sizeof(column->ref_table),
+                        column->ref_column, sizeof(column->ref_column));
+    }
+    return 0;
 }
 
 /*
@@ -413,52 +360,22 @@ void state_init(SharedState *state) {
  * si completeaza tabelele, coloanele si relatiile in structura state
  */
 int load_er_json(SharedState *state, const char *path, char *err, size_t err_len) {
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
-        set_err(err, err_len, "cannot open ER file");
-        return -1;
-    }
-
-    /* mergem la final pentru a afla dimensiunea fisierului */
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        set_err(err, err_len, "cannot seek ER file");
-        return -1;
-    }
-
-    long len = ftell(f);
-
-    /* acceptam doar fisiere rezonabile ca dimensiune */
-    if (len <= 0 || len > 1024 * 1024) {
-        fclose(f);
-        set_err(err, err_len, "ER file is empty or too large");
-        return -1;
-    }
-
-    rewind(f);
-
-    /* alocam memorie pentru intregul continut JSON */
-    char *json = (char *)malloc((size_t)len + 1);
+    size_t json_len = 0;
+    char *json = read_json_file(path, &json_len, err, err_len);
     if (json == NULL) {
-        fclose(f);
-        set_err(err, err_len, "out of memory");
         return -1;
     }
 
-    /* citim continutul fisierului in memorie */
-    if (fread(json, 1, (size_t)len, f) != (size_t)len) {
+    cJSON *root = cJSON_ParseWithLength(json, json_len);
+    if (root == NULL) {
         free(json);
-        fclose(f);
-        set_err(err, err_len, "cannot read ER file");
+        set_err(err, err_len, "invalid ER JSON");
         return -1;
     }
 
-    fclose(f);
-    json[len] = '\0';
-
-    /* extragem array-ul principal "tables" */
-    char tables_json[1024 * 1024];
-    if (!json_extract_array(json, "tables", tables_json, sizeof(tables_json))) {
+    const cJSON *tables = cJSON_GetObjectItemCaseSensitive(root, "tables");
+    if (!cJSON_IsArray(tables)) {
+        cJSON_Delete(root);
         free(json);
         set_err(err, err_len, "missing tables array");
         return -1;
@@ -466,71 +383,57 @@ int load_er_json(SharedState *state, const char *path, char *err, size_t err_len
 
     state->table_count = 0;
 
-    /* parcurgem fiecare obiect tabela din array */
-    for (int pos = 0; state->table_count < MAX_TABLES;) {
-        char table_obj[32768];
-
-        if (!next_object(tables_json, &pos, table_obj, sizeof(table_obj))) {
+    const cJSON *table_json = NULL;
+    cJSON_ArrayForEach(table_json, tables) {
+        if (state->table_count >= MAX_TABLES) {
             break;
         }
-
+        if (!cJSON_IsObject(table_json)) {
+            cJSON_Delete(root);
+            free(json);
+            set_err(err, err_len, "table entry must be object");
+            return -1;
+        }
         Table *t = &state->tables[state->table_count];
         memset(t, 0, sizeof(*t));
 
-        /* extragem numele tabelei */
-        if (!json_get_string(table_obj, "name", t->name, sizeof(t->name))) {
+        if (!cjson_copy_string(table_json, "name", t->name, sizeof(t->name))) {
+            cJSON_Delete(root);
             free(json);
             set_err(err, err_len, "table without name");
             return -1;
         }
 
-        /* pentru fiecare tabela, extragem lista de coloane */
-        char columns_json[32768];
-        if (!json_extract_array(table_obj, "columns", columns_json, sizeof(columns_json))) {
+        const cJSON *columns = cJSON_GetObjectItemCaseSensitive(table_json, "columns");
+        if (!cJSON_IsArray(columns)) {
+            cJSON_Delete(root);
             free(json);
             set_err(err, err_len, "table without columns");
             return -1;
         }
 
-        for (int cpos = 0; t->column_count < MAX_COLUMNS;) {
-            char col_obj[4096];
-
-            if (!next_object(columns_json, &cpos, col_obj, sizeof(col_obj))) {
+        const cJSON *column_json = NULL;
+        cJSON_ArrayForEach(column_json, columns) {
+            if (t->column_count >= MAX_COLUMNS) {
                 break;
             }
-
-            Column *c = &t->columns[t->column_count];
-            memset(c, 0, sizeof(*c));
-
-            /* extragem numele coloanei */
-            if (!json_get_string(col_obj, "name", c->name, sizeof(c->name))) {
+            if (!cJSON_IsObject(column_json)) {
+                cJSON_Delete(root);
                 free(json);
-                set_err(err, err_len, "column without name");
+                set_err(err, err_len, "column entry must be object");
                 return -1;
             }
-
-            /* extragem tipul SQL; daca lipseste, folosim TEXT */
-            if (!json_get_string(col_obj, "type", c->type, sizeof(c->type))) {
-                snprintf(c->type, sizeof(c->type), "TEXT");
+            Column *c = &t->columns[t->column_count];
+            if (load_column_json(c, column_json, err, err_len) < 0) {
+                cJSON_Delete(root);
+                free(json);
+                return -1;
             }
-
-            /* extragem proprietatile logice ale coloanei */
-            c->primary_key = json_get_bool(col_obj, "primary_key");
-            c->unique = json_get_bool(col_obj, "unique");
-            c->not_null = json_get_bool(col_obj, "not_null") || c->primary_key;
-
-            /* daca exista referinta externa, o descompunem in tabela si coloana */
-            char ref[MAX_NAME * 2];
-            if (json_get_string(col_obj, "references", ref, sizeof(ref))) {
-                split_qualified(ref,
-                                c->ref_table, sizeof(c->ref_table),
-                                c->ref_column, sizeof(c->ref_column));
-            }
-
             t->column_count++;
         }
 
         if (t->column_count == 0) {
+            cJSON_Delete(root);
             free(json);
             set_err(err, err_len, "table has no columns");
             return -1;
@@ -540,18 +443,20 @@ int load_er_json(SharedState *state, const char *path, char *err, size_t err_len
     }
 
     /* optional, procesam si relatiile separate din array-ul "relations" */
-    char rels_json[32768];
-    if (json_extract_array(json, "relations", rels_json, sizeof(rels_json))) {
-        for (int pos = 0;;) {
-            char rel_obj[4096], from[MAX_NAME * 2], to[MAX_NAME * 2];
-            char from_table[MAX_NAME], from_col[MAX_NAME], to_table[MAX_NAME], to_col[MAX_NAME];
+    const cJSON *relations = cJSON_GetObjectItemCaseSensitive(root, "relations");
+    if (cJSON_IsArray(relations)) {
+        const cJSON *relation_json = NULL;
+        cJSON_ArrayForEach(relation_json, relations) {
+            char from[MAX_NAME * 2];
+            char to[MAX_NAME * 2];
+            char from_table[MAX_NAME];
+            char from_col[MAX_NAME];
+            char to_table[MAX_NAME];
+            char to_col[MAX_NAME];
 
-            if (!next_object(rels_json, &pos, rel_obj, sizeof(rel_obj))) {
-                break;
-            }
-
-            if (!json_get_string(rel_obj, "from", from, sizeof(from)) ||
-                !json_get_string(rel_obj, "to", to, sizeof(to))) {
+            if (!cJSON_IsObject(relation_json) ||
+                !cjson_copy_string(relation_json, "from", from, sizeof(from)) ||
+                !cjson_copy_string(relation_json, "to", to, sizeof(to))) {
                 continue;
             }
 
@@ -569,6 +474,7 @@ int load_er_json(SharedState *state, const char *path, char *err, size_t err_len
         }
     }
 
+    cJSON_Delete(root);
     free(json);
     snprintf(err, err_len, "loaded %d tables", state->table_count);
     return 0;
@@ -667,7 +573,7 @@ static int parse_value(const char **pp, char *value, size_t value_len, int *is_n
     trim_inplace(value);
 
     /* daca textul este exact NULL, il marcam separat */
-    if (ci_starts(value, "NULL") && value[4] == '\0') {
+    if (strcmp(value, "NULL") == 0) {
         *is_null = 1;
         value[0] = '\0';
     }
@@ -1030,6 +936,20 @@ static int validate_batch_rows(const SharedState *state, const InsertBatch *batc
 }
 
 /*
+ * foloseste libpg_query pentru validarea sintactica PostgreSQL a batch-ului SQL
+ */
+static int validate_sql_syntax_pg_query(const char *sql, char *err, size_t err_len) {
+    PgQueryParseResult result = pg_query_parse(sql);
+    if (result.error != NULL) {
+        snprintf(err, err_len, "SQL syntax error: %s", result.error->message);
+        pg_query_free_parse_result(result);
+        return -1;
+    }
+    pg_query_free_parse_result(result);
+    return 0;
+}
+
+/*
  * valideaza un batch de INSERT-uri fara a-l aplica efectiv
  * este folosita pentru a spune daca instructiunile sunt corecte
  */
@@ -1040,6 +960,10 @@ int validate_insert_batch(const SharedState *state, const char *sql, char *err, 
     }
 
     InsertBatch batch;
+
+    if (validate_sql_syntax_pg_query(sql, err, err_len) < 0) {
+        return -1;
+    }
 
     if (parse_batch(state, sql, &batch, err, err_len) < 0) {
         return -1;
@@ -1059,6 +983,10 @@ int validate_insert_batch(const SharedState *state, const char *sql, char *err, 
  */
 int apply_insert_batch(SharedState *state, const char *sql, char *err, size_t err_len) {
     InsertBatch batch;
+
+    if (validate_sql_syntax_pg_query(sql, err, err_len) < 0) {
+        return -1;
+    }
 
     if (parse_batch(state, sql, &batch, err, err_len) < 0) {
         return -1;
@@ -1101,10 +1029,19 @@ void admin_report(const SharedState *state, const char *category, char *out, siz
 
     } else if (strcmp(category, "commands") == 0) {
         appendf(out, out_len,
-                "Total commands: %ld\nInsert commands: %ld\nFailed commands: %ld\n",
+                "Total commands: %ld\nInsert commands: %ld\nFailed commands: %ld\nCancelled commands: %ld\n",
                 state->total_commands,
                 state->insert_commands,
-                state->failed_commands);
+                state->failed_commands,
+                state->cancelled_commands);
+        if (state->active_client_id > 0) {
+            appendf(out, out_len, "Active command: client=%d op=%d running=%lds\n",
+                    state->active_client_id,
+                    state->active_op_id,
+                    (long)(time(NULL) - state->active_started_at));
+        } else {
+            appendf(out, out_len, "Active command: none\n");
+        }
 
     } else if (strcmp(category, "avg") == 0) {
         long avg = state->total_commands ? state->total_exec_ms / state->total_commands : 0;
@@ -1135,9 +1072,24 @@ void admin_report(const SharedState *state, const char *category, char *out, siz
 
     } else if (strcmp(category, "queue") == 0) {
         appendf(out, out_len, "Ordinary request queue depth: %d\n", state->queue_depth);
+        if (state->cancel_client_id > 0) {
+            appendf(out, out_len, "Pending cancellation for client: %d\n", state->cancel_client_id);
+        }
+
+    } else if (strcmp(category, "jobs") == 0) {
+        appendf(out, out_len, "Recent processing jobs:\n");
+        for (int i = 0; i < MAX_JOBS; i++) {
+            if (state->jobs[i].job_id > 0) {
+                appendf(out, out_len, "job=%d client=%d op=%d status=%s\n",
+                        state->jobs[i].job_id,
+                        state->jobs[i].client_id,
+                        state->jobs[i].op_id,
+                        state->jobs[i].status);
+            }
+        }
 
     } else {
         appendf(out, out_len,
-                "Unknown category. Use: clients, commands, avg, history, tables, queue\n");
+                "Unknown category. Use: clients, commands, avg, history, tables, queue, jobs\n");
     }
 }

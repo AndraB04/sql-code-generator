@@ -1,185 +1,117 @@
-# Software Design Description
+# Software Design Description - Milestone 2
 
-## 1. Arhitectura Generala
+## Arhitectura
 
-Sistemul are trei executabile:
+Sistemul este impartit in cinci componente:
 
-- `server`: proces UNIX C care mentine starea, accepta conexiuni si proceseaza cereri.
-- `client`: CLI pentru upload schema ER, generare SQL si validare inserturi.
-- `admin`: client ncurses pentru rapoarte administrative.
+- `server`: proces TCP principal, cu doua porturi: IN pentru clienti ordinari si UX pentru admin.
+- `client`: client ordinar C pentru upload schema, generare SQL, download SQL si validare INSERT.
+- `admin`: client C/ncurses pentru rapoarte si operatii administrative.
+- `clients/python_client.py`: client ordinar alternativ in Python pentru demonstrarea interoperabilitatii protocolului.
+- `model`: modul comun pentru schema ER, generare SQL, validare si rapoarte; foloseste `cJSON` si `libpg_query`.
 
-Serverul expune doua socket-uri TCP:
+## Protocol
 
-- portul ordinar pentru clienti care trimit scheme si inserturi;
-- portul admin pentru rapoarte.
-
-Ambele socket-uri si conexiunile active sunt multiplexate cu `poll`. Cererile clientilor ordinari sunt puse intr-o coada FIFO comuna. Un thread worker scoate cererile din coada si trimite raspunsul sincron catre clientul care a initiat cererea.
-
-## 2. Module
-
-- `src/protocol.c`: conectare TCP, listen TCP, citire/scriere completa si serializare mesaje.
-- `src/model.c`: model ER, parser JSON minimal, generator SQL, parser/validator `INSERT`, rapoarte admin.
-- `src/server.c`: socket-uri, `poll`, coada FIFO, thread worker, configurare libconfig, `fork`/`waitpid`.
-- `src/client.c`: comenzi interactive si demo neinteractiv.
-- `src/admin_client.c`: UI ncurses pentru rapoarte.
-
-## 3. Stare Partajata
-
-`SharedState` este alocata cu:
+Fiecare mesaj are un header fix `MsgHeader` in network byte order:
 
 ```c
-mmap(NULL, sizeof(SharedState), PROT_READ | PROT_WRITE,
-     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+uint32_t msg_size;
+uint32_t client_id;
+uint32_t op_id;
+uint32_t flags;
 ```
 
-Structura contine:
+Payload-ul este binar si are exact `msg_size` octeti. Operatiile principale sunt:
 
-- tabele, coloane si randuri acceptate;
-- clienti conectati;
-- contori de comenzi;
-- istoric circular;
-- adancimea cozii;
-- starea conexiunii admin.
+- `OP_CONNECT`, `OP_BYE`
+- `OP_UPLOAD_BEGIN`, `OP_UPLOAD_CHUNK`, `OP_UPLOAD_END`
+- `OP_DOWNLOAD_SQL`, `OP_DOWNLOAD_BEGIN`, `OP_DOWNLOAD_CHUNK`, `OP_DOWNLOAD_END`
+- `OP_GENERATE_SQL`, `OP_VALIDATE_INSERT`
+- `OP_JOB_STATUS`, `OP_JOB_RESULT`
+- `OP_ADMIN_LOGIN`, `OP_ADMIN_REPORT`, `OP_ADMIN_DISCONNECT`, `OP_ADMIN_CANCEL`, `OP_ADMIN_BLOCK`, `OP_ADMIN_BYE`
 
-Procesele copil create pentru validarea inserturilor citesc aceeasi stare partajata. Copilul nu modifica starea; doar intoarce rezultatul validarii prin pipe. Parintele aplica batch-ul numai daca validarea copilului reuseste.
+## Server
 
-## 4. Protocol
+Serverul foloseste doua fire de executie I/O. Firul IN gestioneaza clientii ordinari prin socket INET si `poll()`. Firul UX gestioneaza clientul de administrare prin socket separat si `poll()`. Clientii ordinari trebuie sa trimita `OP_CONNECT` inaintea altor operatii. Dupa conectare primesc un `client_id` unic.
 
-Header-ul este fix:
+Operatiile clientilor ordinari sunt impachetate in `Request` si puse intr-o coada FIFO protejata de `pthread_mutex_t` si `pthread_cond_t`. Un worker proceseaza cererile si trimite raspunsul catre client.
 
-```c
-typedef struct {
-    uint32_t msg_size;
-    uint32_t client_id;
-    uint32_t op_id;
-    uint32_t flags;
-} MsgHeader;
-```
+Clientul admin este acceptat pe un port separat. Exista un singur admin conectat la un moment dat. Daca adminul este inactiv peste timeout, serverul inchide conexiunea si permite conectarea altui admin.
 
-Campurile sunt trimise in network byte order. Payload-ul are lungimea `msg_size` si nu foloseste delimitatori suplimentari.
+Fiecare operatie de procesare primeste `job_id` si este retinuta in `SharedState` cu status `QUEUED`, `RUNNING`, `DONE` sau `ERROR`. Clientul poate cere sincron `OP_JOB_STATUS` sau `OP_JOB_RESULT`. Evenimentele principale sunt scrise in `logs/server.log`.
 
-Operatii:
+## Transfer Fisiere
 
-- `OP_CONNECT = 0`
-- `OP_BYE = 5`
-- `OP_UPLOAD_BEGIN = 10`
-- `OP_UPLOAD_CHUNK = 11`
-- `OP_UPLOAD_END = 12`
-- `OP_GENERATE_SQL = 20`
-- `OP_VALIDATE_INSERT = 30`
-- `OP_OK = 40`
-- `OP_ERROR = 41`
-- `OP_ADMIN_LOGIN = 100`
-- `OP_ADMIN_REPORT = 101`
-- `OP_ADMIN_BYE = 105`
+Upload-ul foloseste fisiere temporare `data/upload_<client_id>.schema.json`. Clientul trimite:
 
-## 5. Fluxuri Interne
+1. `OP_UPLOAD_BEGIN`
+2. mai multe mesaje `OP_UPLOAD_CHUNK`
+3. `OP_UPLOAD_END`
 
-### Upload ER
+Download-ul SQL generat foloseste:
 
-1. Clientul cere `OP_UPLOAD_BEGIN`.
-2. Serverul creeaza `data/upload_<client_id>.schema.json`.
-3. Clientul trimite chunk-uri de maxim `64 KB`.
-4. Serverul append-uie fiecare chunk.
-5. La `OP_UPLOAD_END`, serverul parseaza fisierul si reseteaza modelul curent.
+1. clientul trimite `OP_DOWNLOAD_SQL`
+2. serverul trimite `OP_DOWNLOAD_BEGIN`
+3. serverul trimite mai multe `OP_DOWNLOAD_CHUNK`
+4. serverul trimite `OP_DOWNLOAD_END`
 
-### Generare SQL
+Dimensiunea chunk-ului este `SQLCG_FILE_CHUNK`, adica 64 KB.
 
-Generatorul parcurge tabelele din `SharedState` si construieste instructiuni `CREATE TABLE`. Constraint-urile sunt scrise inline pe coloane:
+## Model Date
 
-- `PRIMARY KEY`;
+`SharedState` retine schema incarcata, randurile acceptate, clientii activi si statisticile administrative. Modulul `model.c` incarca JSON-ul ER cu `cJSON`, genereaza SQL si valideaza batch-uri `INSERT`.
+
+Pentru fiecare batch `INSERT`, serverul creeaza un proces copil cu `fork()`. Copilul valideaza batch-ul folosind aceeasi stare `SharedState` mapata prin `mmap()`, apoi trimite rezultatul catre parinte prin pipe. Parintele aplica batch-ul doar daca validarea copilului a reusit.
+
+Validarea SQL are doua straturi:
+
+- `libpg_query` verifica sintaxa PostgreSQL a query-ului;
+- validatorul semantic intern verifica modelul ER incarcat si anticipeaza erorile `constraint failed`.
+
+Validarea verifica:
+
+- existenta tabelei si a coloanelor;
 - `NOT NULL`;
-- `UNIQUE`;
-- `REFERENCES table(column)`.
+- duplicate pentru `PRIMARY KEY` si `UNIQUE`;
+- foreign key catre randuri existente;
+- consistenta numarului de coloane si valori.
 
-### Validare Insert
+## Operatii Admin
 
-1. Worker-ul primeste `OP_VALIDATE_INSERT`.
-2. Incrementeaza contorul de inserturi.
-3. Creeaza pipe si proces copil.
-4. Copilul parseaza batch-ul si verifica toate constrangerile.
-5. Copilul scrie statusul in pipe si iese cu `_exit`.
-6. Parintele asteapta cu `waitpid`.
-7. Parintele ruleaza din nou parsarea/aplicarea in procesul principal, pentru a modifica starea comuna.
+Rapoartele sunt generate de `admin_report()`. Operatiile active sunt procesate direct in server:
 
-Acest design separa validarea demonstrativa in proces copil, dar pastreaza mutatiile in parinte, evitand modificari accidentale facute de copil.
+- deconectare client: cauta `client_id`, notifica socketul clientului si il elimina din `poll`;
+- anulare comanda: marcheaza `cancel_client_id`, iar workerul respinge cererea urmatoare/curenta observabila pentru acel client;
+- blocare IP/domeniu: adauga adresa intr-o blocklist si refuza conexiunile IN viitoare de la acea adresa.
 
-## 6. Validare Inserturi
+## Decizii Pentru Milestone 2
 
-Parserul accepta:
+- Coada de procesare este inclusa pentru toate cererile clientilor ordinari.
+- Transferul este bidirectional pentru punctajul maxim pe criteriul de fisiere.
+- Clientul admin are atat UI ncurses, cat si mod neinteractiv pentru testare.
+- Clientul Python foloseste acelasi protocol binar si poate fi rulat de pe alt sistem.
+- Fisierele locale din client folosesc apeluri POSIX (`open`, `read`, `write`, `close`) pentru zona IN.
+- Serverul proceseaza datele in C si nu porneste scripturi externe Python/Java.
+- Componenta web services nu este implementata in Milestone 2; daca se adauga ulterior, directia proiectata este gSOAP/SOAP.
 
-```sql
-INSERT INTO table (col1, col2) VALUES (v1, v2), (v3, v4);
-```
+## Analiza Statica Si Profilare
 
-Se verifica:
+Buildul implicit foloseste `-Wall -Wextra -Wpedantic -Werror -std=c11 -D_POSIX_C_SOURCE=200809L`. Serverul este linkat cu `-pthread`.
 
-- tabela exista;
-- coloanele exista;
-- numarul de coloane corespunde cu numarul de valori;
-- `NOT NULL` si `PRIMARY KEY` nu primesc `NULL`;
-- `PRIMARY KEY` si `UNIQUE` nu se repeta in starea existenta sau in acelasi batch;
-- foreign key-ul indica o valoare existenta in tabela referita sau intr-un rand validat anterior din acelasi batch.
+Repository-ul include `.clang-tidy` cu checks pentru `clang-analyzer`, `bugprone`, `cert`, `concurrency`, `misc`, `performance`, `portability` si `readability`, cu `WarningsAsErrors: '*'`.
 
-## 7. Configurare
+Makefile-ul expune tintele:
 
-Serverul integreaza libconfig. Valorile sunt incarcate in `RuntimeConfig`.
+- `make clang-tidy`: analiza statica pe toate sursele C;
+- `make asan`: Address/Leak/Undefined Sanitizer;
+- `make tsan`: Thread Sanitizer;
+- `make memcheck`: Valgrind Memcheck;
+- `make helgrind`: Valgrind Helgrind.
 
-Ordinea de precedenta:
+Implementarea evita `strcpy`, `strcat`, `system`, `exec`, `popen`, `vfork`, VLA si `pthread_cancel`. I/O-ul pe socketuri si fisiere foloseste wrappers cu verificarea valorilor returnate.
 
-1. valori implicite: `SQLCG_PORT`, `SQLCG_ADMIN_PORT`, `60`;
-2. fisier libconfig, implicit `config.cfg`;
-3. variabile de mediu: `CONFIG_PATH`, `SERVER_PORT`, `ADMIN_PORT`, `ADMIN_TIMEOUT`;
-4. argumente CLI: `--config`, `--port`, `--admin-port`, `--admin-timeout`.
+## Limitari Cunoscute
 
-Daca fisierul de configurare lipseste sau nu poate fi citit, serverul afiseaza un mesaj de fallback si continua cu valorile disponibile.
-
-Makefile-ul activeaza calea libconfig cand `pkg-config` gaseste biblioteca si defineste `HAVE_LIBCONFIG`. Pentru sisteme de dezvoltare fara headerul `libconfig.h`, exista un parser de fallback limitat la cheile folosite in `config.cfg`, astfel incat restul demo-ului poate fi compilat si testat.
-
-## 8. Administrare
-
-Clientul admin foloseste ncurses si cere rapoarte prin `OP_ADMIN_REPORT`.
-
-Categorii implementate:
-
-- `clients`: clienti ordinari conectati si idle time;
-- `commands`: comenzi totale, inserturi si esecuri;
-- `avg`: durata medie de executie;
-- `history`: istoric recent;
-- `tables`: tabele incarcate si numar de randuri;
-- `queue`: adancimea cozii FIFO.
-
-Serverul permite un singur admin conectat. Un al doilea admin primeste eroare pana cand primul se deconecteaza sau expira prin timeout.
-
-## 9. Specificatie Web/API
-
-Executabilul curent foloseste protocol TCP binar. `docs/openapi.yaml` documenteaza o interfata HTTP/WS echivalenta pentru etapa Web Service:
-
-- `POST /schemas` pentru incarcare schema;
-- `POST /sql/generate` pentru generare SQL;
-- `POST /inserts/validate` pentru validare insert;
-- `GET /admin/reports/{category}` pentru rapoarte;
-- `/ws/protocol` pentru mesaje WebSocket bazate pe aceleasi operatii.
-
-Aceasta separare pastreaza protocolul cerut pentru Milestone 1 si lasa clar contractul pentru extensia de nivel C.
-
-## 10. Calitate Si Verificare
-
-Build-ul foloseste:
-
-```make
-CFLAGS=-g -Wall -Wextra -std=c11 -D_DEFAULT_SOURCE -Iinclude
-LDFLAGS=-pthread -lconfig
-```
-
-Demo recomandat:
-
-```sh
-make
-./server
-./client --input examples/er_schema.json --generate --insert-file examples/inserts_ok.sql --no-repl
-./client --input examples/er_schema.json --insert-file examples/inserts_fail_fk.sql --no-repl
-./admin
-```
-
-Pentru clang-tidy/build warnings, codul este tinut fara dependinte de limbaje auxiliare si fara comentarii decorative. Comentariile se adauga doar unde o decizie de proiectare nu este evidenta din cod.
+- Schema ER este parsata cu `cJSON`, dar formatul acceptat ramane cel documentat in `examples/er_schema.json`.
+- Sintaxa SQL este validata cu `libpg_query`; validatorul semantic acopera `INSERT INTO table [(cols...)] VALUES (...), (...);`.
+- Anularea admin este cooperativa la nivelul workerului; pentru operatii foarte scurte efectul poate fi observat doar ca cerere de anulare in raport.

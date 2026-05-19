@@ -1,0 +1,146 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: libpg_query
+Source: https://github.com/pganalyze/libpg_query
+
+Files: *
+Copyright: Copyright (c) 2015, Lukas Fittl <lukas@fittl.com>
+License: 3-BSD
+
+License: 3-BSD
+ All rights reserved.
+ .
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are met:
+ .
+ * Redistributions of source code must retain the above copyright notice, this
+ list of conditions and the following disclaimer.
+ .
+ * Redistributions in binary form must reproduce the above copyright notice,
+ this list of conditions and the following disclaimer in the documentation
+ and/or other materials provided with the distribution.
+ .
+ * Neither the name of pg_query nor the names of its contributors may be used
+ to endorse or promote products derived from this software without specific
+ prior written permission.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ POSSIBILITY OF SUCH DAMAGE.
+
+Files: src/postgres/*
+Copyright:
+ Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
+ Portions Copyright (c) 1994, Regents of the University of California
+ Copyright (c) 1983, 1995, 1996 Eric P. Allman
+ Portions Copyright (c) 1993 Martin Birgmeier
+ Copyright (c) 1998, 1999 Henry Spencer.  All rights reserved.
+License: PostgreSQL and 3-BSD and Birgmeier and Spencer
+
+License: PostgreSQL
+ PostgreSQL Database Management System
+ (formerly known as Postgres, then as Postgres95)
+ .
+ Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ .
+ Portions Copyright (c) 1994, The Regents of the University of California
+ .
+ Permission to use, copy, modify, and distribute this software and its
+ documentation for any purpose, without fee, and without a written agreement
+ is hereby granted, provided that the above copyright notice and this
+ paragraph and the following two paragraphs appear in all copies.
+ .
+ IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR
+ DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
+ LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS
+ DOCUMENTATION, EVEN IF THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE
+ POSSIBILITY OF SUCH DAMAGE.
+ .
+ THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES,
+ INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+ AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+ ON AN "AS IS" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO
+ PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+
+License: Birgmeier
+ All rights reserved.
+ .
+ You may redistribute unmodified or modified versions of this source
+ code provided that the above copyright notice and this and the
+ following conditions are retained.
+ .
+ This software is provided ``as is'', and comes with no warranties
+ of any kind. I shall in no event be liable for anything that happens
+ to anyone/anything when using this software.
+
+License: Spencer
+ Development of this software was funded, in part, by Cray Research Inc.,
+ UUNET Communications Services Inc., Sun Microsystems Inc., and Scriptics
+ Corporation, none of whom are responsible for the results.  The author
+ thanks all of them.
+ .
+ Redistribution and use in source and binary forms -- with or without
+ modification -- are permitted for any purpose, provided that
+ redistributions in source form retain this entire copyright notice and
+ indicate the origin and nature of any modifications.
+ .
+ I'd appreciate being given credit for this package in the documentation
+ of software which uses it, but that is not a requirement.
+ .
+ THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES,
+ INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+ AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL
+ HENRY SPENCER BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+ OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Files: vendor/xxhash/*
+Copyright: Copyright (C) 2012-2020 Yann Collet
+License: 2-BSD
+
+Files: vendor/protobuf-c/*
+Copyright: Copyright (c) 2008-2018, Dave Benson and the protobuf-c authors.
+License: 2-BSD
+
+License: 2-BSD
+ BSD 2-Clause License (https://www.opensource.org/licenses/bsd-license.php)
+ .
+ All rights reserved.
+ .
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are
+ met:
+ .
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following disclaimer
+      in the documentation and/or other materials provided with the
+      distribution.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Files: debian/*
+Copyright: 2022 Christoph Berg <myon@debian.org>
+License: 3-BSD

@@ -12,9 +12,12 @@
 #include "protocol.h"   /* definitii pentru protocolul de comunicatie si functiile TCP */
 
 #include <errno.h>      /* variabila globala errno si coduri de eroare */
+#include <fcntl.h>      /* open pentru fisiere locale */
 #include <stdio.h>      /* functii standard de intrare/iesire */
 #include <stdlib.h>     /* conversii si alocare memorie */
 #include <string.h>     /* manipulare siruri si memorie */
+#include <sys/stat.h>   /* fstat pentru dimensiunea fisierelor */
+#include <sys/types.h>  /* tipuri POSIX */
 #include <unistd.h>     /* functii POSIX precum close */
 
 /*
@@ -49,7 +52,7 @@ static int parse_port(const char *value, uint16_t *port) {
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s [host] [--host host] [--port port] [--input schema.json]\n"
-            "          [--generate] [--insert-file batch.sql] [--no-repl]\n",
+            "          [--generate] [--download-sql out.sql] [--insert-file batch.sql] [--no-repl]\n",
             prog);
 }
 
@@ -117,8 +120,8 @@ static int connect_protocol(int fd, uint32_t *client_id) {
  * folosind operatiile OP_UPLOAD_BEGIN, OP_UPLOAD_CHUNK si OP_UPLOAD_END
  */
 static int upload_file(int fd, uint32_t client_id, const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
+    int file_fd = open(path, O_RDONLY);
+    if (file_fd < 0) {
         fprintf(stderr, "cannot open %s: %s\n", path, strerror(errno));
         return -1;
     }
@@ -128,14 +131,14 @@ static int upload_file(int fd, uint32_t client_id, const char *path) {
      * payload-ul initial este chiar calea sau numele fisierului
      */
     if (request_text(fd, client_id, OP_UPLOAD_BEGIN, path, NULL) < 0) {
-        fclose(f);
+        close(file_fd);
         return -1;
     }
 
     /* alocam bufferul pentru bucati de fisier */
     char *buf = (char *)malloc(SQLCG_FILE_CHUNK);
     if (buf == NULL) {
-        fclose(f);
+        close(file_fd);
         return -1;
     }
 
@@ -144,12 +147,22 @@ static int upload_file(int fd, uint32_t client_id, const char *path) {
      * dupa fiecare bloc asteptam confirmare OP_OK
      */
     for (;;) {
-        size_t n = fread(buf, 1, SQLCG_FILE_CHUNK, f);
+        ssize_t n = read(file_fd, buf, SQLCG_FILE_CHUNK);
+
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "read failed: %s\n", strerror(errno));
+            free(buf);
+            close(file_fd);
+            return -1;
+        }
 
         if (n > 0) {
             if (send_message(fd, client_id, OP_UPLOAD_CHUNK, buf, (uint32_t)n) < 0) {
                 free(buf);
-                fclose(f);
+                close(file_fd);
                 return -1;
             }
 
@@ -160,7 +173,7 @@ static int upload_file(int fd, uint32_t client_id, const char *path) {
                 fprintf(stderr, "%s\n", resp ? resp : "upload chunk failed");
                 free(resp);
                 free(buf);
-                fclose(f);
+                close(file_fd);
                 return -1;
             }
 
@@ -168,25 +181,84 @@ static int upload_file(int fd, uint32_t client_id, const char *path) {
         }
 
         /*
-         * daca am citit mai putin decat dimensiunea maxima a blocului,
-         * inseamna ca am ajuns la finalul fisierului sau a aparut o eroare
+         * daca read intoarce 0, am ajuns la finalul fisierului
          */
-        if (n < SQLCG_FILE_CHUNK) {
-            if (ferror(f)) {
-                fprintf(stderr, "read failed: %s\n", strerror(errno));
-                free(buf);
-                fclose(f);
-                return -1;
-            }
+        if (n == 0) {
             break;
         }
     }
 
     free(buf);
-    fclose(f);
+    close(file_fd);
 
     /* anuntam serverul ca upload-ul s-a incheiat */
     return request_text(fd, client_id, OP_UPLOAD_END, "", NULL);
+}
+
+/*
+ * cere serverului SQL-ul generat si il salveaza local prin transfer chunked
+ */
+static int download_sql_file(int fd, uint32_t client_id, const char *path) {
+    if (send_message(fd, client_id, OP_DOWNLOAD_SQL, "", 0) < 0) {
+        return -1;
+    }
+
+    int out_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0664);
+    if (out_fd < 0) {
+        fprintf(stderr, "cannot create %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    int saw_begin = 0;
+    size_t bytes = 0;
+
+    for (;;) {
+        MsgHeader h;
+        char *payload = NULL;
+        int rc = recv_message(fd, &h, &payload);
+        if (rc <= 0) {
+            free(payload);
+            close(out_fd);
+            return -1;
+        }
+
+        if (h.op_id == OP_DOWNLOAD_BEGIN) {
+            saw_begin = 1;
+        } else if (h.op_id == OP_DOWNLOAD_CHUNK) {
+            if (!saw_begin) {
+                fprintf(stderr, "download chunk received before begin\n");
+                free(payload);
+                close(out_fd);
+                return -1;
+            }
+            if (h.msg_size > 0 && write_full(out_fd, payload, h.msg_size) < 0) {
+                fprintf(stderr, "cannot write %s: %s\n", path, strerror(errno));
+                free(payload);
+                close(out_fd);
+                return -1;
+            }
+            bytes += h.msg_size;
+        } else if (h.op_id == OP_DOWNLOAD_END) {
+            printf("Saved %zu bytes to %s\n", bytes, path);
+            free(payload);
+            break;
+        } else if (h.op_id == OP_ERROR) {
+            fprintf(stderr, "%s\n", payload ? payload : "download failed");
+            free(payload);
+            close(out_fd);
+            return -1;
+        } else {
+            fprintf(stderr, "unexpected download message %u\n", h.op_id);
+            free(payload);
+            close(out_fd);
+            return -1;
+        }
+
+        free(payload);
+    }
+
+    close(out_fd);
+    return 0;
 }
 
 /*
@@ -194,41 +266,57 @@ static int upload_file(int fd, uint32_t client_id, const char *path) {
  * apelantul este responsabil sa faca free() dupa utilizare
  */
 static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
         return NULL;
     }
 
-    /* determinam dimensiunea fisierului */
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    rewind(f);
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        close(fd);
+        return NULL;
+    }
 
     /*
      * fisierul nu trebuie sa fie negativ ca dimensiune si nici prea mare
      * fata de limita maxima acceptata de protocol
      */
-    if (len < 0 || len > (long)SQLCG_MAX_PAYLOAD) {
-        fclose(f);
+    if (st.st_size < 0 || st.st_size > (off_t)SQLCG_MAX_PAYLOAD) {
+        close(fd);
         return NULL;
     }
 
     /* alocam memorie pentru continut + terminatorul de sir */
-    char *buf = (char *)malloc((size_t)len + 1);
+    char *buf = (char *)malloc((size_t)st.st_size + 1);
     if (buf == NULL) {
-        fclose(f);
+        close(fd);
         return NULL;
     }
 
     /* citim tot fisierul in buffer */
-    if (fread(buf, 1, (size_t)len, f) != (size_t)len) {
-        free(buf);
-        fclose(f);
-        return NULL;
+    size_t got = 0;
+    while (got < (size_t)st.st_size) {
+        ssize_t n = read(fd, buf + got, (size_t)st.st_size - got);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            free(buf);
+            close(fd);
+            return NULL;
+        }
+        if (n == 0) {
+            break;
+        }
+        got += (size_t)n;
     }
 
-    fclose(f);
-    buf[len] = '\0';
+    close(fd);
+    if (got != (size_t)st.st_size) {
+        free(buf);
+        return NULL;
+    }
+    buf[st.st_size] = '\0';
     return buf;
 }
 
@@ -239,6 +327,9 @@ static void print_help(void) {
     puts("Commands:");
     puts("  upload <schema.json>");
     puts("  generate");
+    puts("  download <out.sql>");
+    puts("  status [job_id|last]");
+    puts("  result [job_id|last]");
     puts("  insert <INSERT INTO ...>");
     puts("  insertfile <batch.sql>");
     puts("  quit");
@@ -248,6 +339,7 @@ int main(int argc, char **argv) {
     const char *host = "127.0.0.1";   /* host implicit */
     const char *input_path = NULL;    /* fisier JSON ER de incarcat optional */
     const char *insert_path = NULL;   /* fisier SQL cu INSERT-uri optional */
+    const char *download_path = NULL; /* fisier SQL generat descarcat optional */
     uint16_t port = SQLCG_PORT;       /* portul implicit al serverului */
 
     int generate_once = 0;            /* daca s-a cerut generarea SQL din linia de comanda */
@@ -277,6 +369,9 @@ int main(int argc, char **argv) {
 
         } else if (strcmp(argv[i], "--insert-file") == 0 && i + 1 < argc) {
             insert_path = argv[++i];
+
+        } else if (strcmp(argv[i], "--download-sql") == 0 && i + 1 < argc) {
+            download_path = argv[++i];
 
         } else if (strcmp(argv[i], "--generate") == 0) {
             generate_once = 1;
@@ -326,6 +421,14 @@ int main(int argc, char **argv) {
      * trimitem cererea catre server
      */
     if (generate_once && request_text(fd, client_id, OP_GENERATE_SQL, "", NULL) < 0) {
+        close(fd);
+        return 1;
+    }
+
+    /*
+     * descarcam SQL-ul generat prin transfer server -> client daca s-a cerut
+     */
+    if (download_path != NULL && download_sql_file(fd, client_id, download_path) < 0) {
         close(fd);
         return 1;
     }
@@ -388,6 +491,22 @@ int main(int argc, char **argv) {
         } else if (strcmp(line, "generate") == 0) {
             /* cerem generarea codului SQL */
             request_text(fd, client_id, OP_GENERATE_SQL, "", NULL);
+
+        } else if (strncmp(line, "download ", 9) == 0) {
+            /* descarcam SQL-ul generat intr-un fisier local */
+            download_sql_file(fd, client_id, line + 9);
+
+        } else if (strcmp(line, "status") == 0) {
+            request_text(fd, client_id, OP_JOB_STATUS, "last", NULL);
+
+        } else if (strncmp(line, "status ", 7) == 0) {
+            request_text(fd, client_id, OP_JOB_STATUS, line + 7, NULL);
+
+        } else if (strcmp(line, "result") == 0) {
+            request_text(fd, client_id, OP_JOB_RESULT, "last", NULL);
+
+        } else if (strncmp(line, "result ", 7) == 0) {
+            request_text(fd, client_id, OP_JOB_RESULT, line + 7, NULL);
 
         } else if (strncmp(line, "insert ", 7) == 0) {
             /* trimitem direct o instructiune INSERT pentru validare */

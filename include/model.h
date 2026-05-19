@@ -28,6 +28,8 @@
 #define MAX_VALUE 128
 #define MAX_HISTORY 128
 #define MAX_COMMAND 128
+#define MAX_JOBS 128
+#define MAX_JOB_RESULT 2048
 
 /*
  * structura care descrie o coloana dintr-o tabela a modelului ER
@@ -76,6 +78,17 @@ typedef struct {
     long last_seen;      /* momentul ultimei activitati */
 } ClientInfo;
 
+typedef struct {
+    int job_id;                         /* identificatorul procesarii */
+    int client_id;                      /* clientul care a cerut procesarea */
+    int op_id;                          /* operatia procesata */
+    char status[16];                    /* QUEUED, RUNNING, DONE, ERROR */
+    char result[MAX_JOB_RESULT];        /* ultimul rezultat disponibil */
+    long queued_at;                     /* momentul intrarii in coada */
+    long started_at;                    /* momentul pornirii procesarii */
+    long finished_at;                   /* momentul finalizarii procesarii */
+} JobInfo;
+
 /*
  * starea comuna a serverului
  * este plasata in memorie partajata pentru ca procesul copil de validare
@@ -86,12 +99,20 @@ typedef struct {
     long total_commands;                     /* numarul total de comenzi procesate */
     long insert_commands;                    /* numarul comenzilor INSERT primite */
     long failed_commands;                    /* numarul comenzilor terminate cu eroare */
+    long cancelled_commands;                 /* numarul comenzilor anulate de administrator */
     long total_exec_ms;                      /* timpul total de executie pentru comenzi */
     int queue_depth;                         /* cate cereri obisnuite asteapta in coada */
     int client_count;                        /* numarul de clienti obisnuiti activi */
     int next_client_id;                      /* urmatorul id alocat unui client */
+    int next_job_id;                         /* urmatorul id alocat unui job */
     int admin_connected;                     /* 1 daca exista un client admin conectat */
+    int active_client_id;                    /* clientul a carui cerere este procesata acum */
+    int active_op_id;                        /* operatia aflata in procesare */
+    long active_started_at;                  /* momentul pornirii operatiei curente */
+    int cancel_client_id;                    /* clientul pentru care adminul a cerut anulare */
     ClientInfo clients[128];                 /* lista clientilor cunoscuti */
+    int last_job_by_client[128];             /* ultimul job cunoscut per client */
+    JobInfo jobs[MAX_JOBS];                  /* istoric circular de joburi procesate */
     char history[MAX_HISTORY][MAX_COMMAND];  /* istoricul circular al comenzilor recente */
     int history_count;                       /* cate intrari au fost adaugate in istoric */
     int table_count;                         /* numarul de tabele incarcate */

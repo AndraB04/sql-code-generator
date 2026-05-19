@@ -1,190 +1,76 @@
-# Software Requirements Specification
+# Software Requirements Specification - Milestone 2
 
-## 1. Introducere
+## Scop
 
-SQL Code Generator este aplicatia aleasa pentru Milestone 1. Proiectul porneste de la un skeleton client-server C si dezvolta o unealta care transforma o descriere ER in SQL si valideaza preventiv batch-uri `INSERT`.
+Aplicatia SQL Code Generator primeste o schema ER in format JSON, genereaza cod SQL `CREATE TABLE` pentru toate tabelele si relatiile dintre acestea si valideaza batch-uri `INSERT` inainte de aplicarea lor intr-o baza de date reala. Pentru Milestone 2, sistemul include server functional, client ordinar C, client ordinar alternativ Python si client de administrare ncurses.
 
-Problema urmarita este una practica: inainte de rularea unor inserturi intr-o baza de date, serverul poate spune daca acestea ar incalca schema incarcata. Pentru demo, starea este tinuta in memorie partajata, nu intr-un SGBD real.
+## Actori
 
-## 2. Scop Si Tematica
+- ADMIN (UX): ruleaza pe aceeasi masina cu serverul si executa operatii de administrare fara transfer de fisiere.
+- REMOTE/IN: client ordinar conectat prin socket INET, local sau de pe alta masina.
+- Server: proceseaza clientii ordinari printr-o coada FIFO si adminul pe canal separat sincron.
 
-Aplicatia trebuie sa:
+## Cerinte Functionale
 
-- primeasca o schema ER in format JSON;
-- construiasca modelul intern de tabele, coloane si relatii;
-- genereze instructiuni `CREATE TABLE`;
-- valideze `INSERT INTO ... VALUES ...` pentru constrangeri uzuale;
-- ofere rapoarte administrative printr-un client separat;
-- demonstreze folosirea apelurilor UNIX cerute la curs: socket-uri, `poll`, thread worker, `fork`, `waitpid`, `mmap`;
-- integreze biblioteci externe: libconfig pentru configurare si ncurses pentru interfata admin.
+### Client ADMIN
 
-## 3. Actori
+1. Autentificare admin cu un singur administrator conectat simultan.
+2. Deconectare automata la timeout de inactivitate configurabil.
+3. Rapoarte pentru clienti conectati.
+4. Rapoarte pentru comenzi totale, comenzi INSERT, comenzi esuate si comenzi anulate.
+5. Rapoarte pentru durata medie de executie.
+6. Rapoarte pentru istoric recent de operatii.
+7. Rapoarte pentru tabele incarcate si numar de randuri.
+8. Rapoarte pentru adancimea cozii de procesare.
+9. Deconectarea fortata a unui client ordinar dupa `client_id`.
+10. Anularea unei comenzi curente/pending dupa `client_id`.
+11. Blocarea accesului dinspre un IP/domeniu.
 
-- Client ordinar: incarca schema ER, cere generarea SQL si trimite inserturi pentru validare.
-- Administrator: consulta starea serverului prin clientul ncurses.
-- Server: accepta conexiuni, tine starea comuna si proceseaza cereri printr-o coada FIFO.
+### Client REMOTE/IN
 
-## 4. Cerinte Functionale
+1. Conectare TCP si primire `client_id` unic.
+2. Transfer fisier schema ER client -> server prin bucati de 64 KB.
+3. Incarcare schema ER JSON pe server.
+4. Generare SQL `CREATE TABLE`.
+5. Transfer fisier SQL generat server -> client prin bucati de 64 KB.
+6. Validare sintactica batch `INSERT` cu `libpg_query`.
+7. Validare semantica batch `INSERT` pentru anticiparea erorilor `constraint failed`.
+8. Aplicare in memorie a inserturilor valide pentru validari ulterioare.
+9. Tratare erori pentru tabela/coloana inexistenta, `NOT NULL`, `PRIMARY KEY`, `UNIQUE`, foreign key lipsa.
+10. Verificare sincrona stare procesare prin `status [job_id|last]`.
+11. Acces sincron la rezultatul procesarii prin `result [job_id|last]`.
+12. Inchidere controlata prin `BYE`.
+13. Client ordinar alternativ in Python pe acelasi protocol.
 
-- Serverul asculta conexiuni TCP pentru clienti ordinari pe portul configurabil `18081`.
-- Serverul asculta conexiuni TCP admin pe portul configurabil `18082`.
-- Serverul accepta un singur client admin conectat simultan.
-- Conexiunea admin expira dupa timeout configurabil, implicit `60` secunde.
-- Clientii ordinari primesc un `client_id` prin operatia `OP_CONNECT`.
-- Upload-ul schemei ER se face chunked, cu bucati de maxim `64 KB`.
-- Serverul parseaza schema ER din JSON si actualizeaza starea interna.
-- Serverul genereaza SQL `CREATE TABLE` cu `PRIMARY KEY`, `UNIQUE`, `NOT NULL` si `REFERENCES`.
-- Serverul valideaza batch-uri `INSERT` pentru tabele existente, coloane existente, valori `NULL`, duplicate si foreign key lipsa.
-- Pentru validarea inserturilor, serverul creeaza un proces copil cu `fork()` si asteapta rezultatul cu `waitpid()`.
-- Dupa validare reusita, procesul parinte aplica inserturile in starea partajata.
-- Adminul poate cere rapoarte despre clienti, comenzi, durata medie, istoric, tabele si adancimea cozii.
+## Cerinte Nefunctionale
 
-## 5. Cerinte Nefunctionale
+- Serverul accepta mai multi clienti ordinari simultan.
+- Cererile clientilor ordinari sunt puse intr-o coada FIFO comuna.
+- Serverul are fir de executie separat pentru interfata clientilor ordinari IN.
+- Serverul are fir de executie separat pentru interfata admin UX.
+- Canalul admin este sincron si separat de canalul IN.
+- Buildul C trebuie sa treaca fara warning-uri cu `-Wall -Wextra -Wpedantic -Werror`.
+- Codul trebuie sa fie compilat cu `-std=c11 -D_POSIX_C_SOURCE=200809L`.
+- Repository-ul trebuie sa includa fisier `.clang-tidy` cu checks pentru analyzer, bugprone, cert, concurrency, misc, performance, portability si readability, tratate ca erori.
+- Pentru profilare memorie trebuie sa existe tinte pentru ASan/LSan/UBSan si Valgrind Memcheck.
+- Pentru concurenta trebuie sa existe tinte pentru TSan si Valgrind Helgrind.
+- Serverul trebuie sa foloseasca `cJSON` pentru parsarea diagramei ER.
+- Serverul trebuie sa foloseasca `libpg_query` pentru analiza sintactica a query-urilor SQL.
+- Serverul nu trebuie sa execute scripturi Python/Java pentru procesarea datelor; prelucrarea are loc in C.
+- Componenta web services, daca este adaugata ulterior, trebuie proiectata pe gSOAP/SOAP.
+- Transferul de fisiere trebuie sa functioneze pentru fisiere modeste, pana la cateva sute de MB, prin chunking.
+- Protocolul foloseste header fix binar: `msg_size`, `client_id`, `op_id`, `flags`.
+- Configurarea porturilor si timeoutului admin se face prin `config.cfg`, variabile de mediu sau argumente CLI.
+- Serverul trebuie sa scrie evenimentele demonstrabile intr-un fisier de logging.
 
-- Implementarea este in C pe UNIX/Linux.
-- Comunicarea foloseste socket-uri TCP si protocol binar propriu.
-- Multiplexarea conexiunilor se face cu `poll`.
-- Cererile clientilor ordinari sunt puse intr-o coada FIFO procesata de un thread worker.
-- Starea demonstrativa este alocata cu `mmap(..., MAP_SHARED | MAP_ANONYMOUS, ...)`.
-- Codul trebuie sa ramana compilabil cu `-Wall -Wextra -std=c11`.
-- Comentariile din cod se folosesc doar unde clarifica o decizie netriviala.
+## Mapare Milestone 2
 
-## 6. Structura Mesajelor
-
-Fiecare mesaj are header fix:
-
-```c
-typedef struct {
-    uint32_t msg_size;
-    uint32_t client_id;
-    uint32_t op_id;
-    uint32_t flags;
-} MsgHeader;
-```
-
-Campurile sunt trimise in network byte order. `msg_size` descrie payload-ul, iar payload-ul poate fi text UTF-8 sau bytes de fisier.
-
-Operatii principale:
-
-- `OP_CONNECT`: inregistreaza un client ordinar si intoarce `client_id`.
-- `OP_BYE`: inchide conexiunea ordinara.
-- `OP_UPLOAD_BEGIN`: initializeaza fisierul temporar de upload.
-- `OP_UPLOAD_CHUNK`: trimite un chunk din schema ER.
-- `OP_UPLOAD_END`: finalizeaza upload-ul si parseaza schema.
-- `OP_GENERATE_SQL`: cere SQL-ul generat din schema curenta.
-- `OP_VALIDATE_INSERT`: valideaza si aplica un batch de inserturi.
-- `OP_ADMIN_LOGIN`: autentifica adminul cu token demonstrativ.
-- `OP_ADMIN_REPORT`: cere un raport admin.
-- `OP_ADMIN_BYE`: inchide conexiunea admin.
-
-Raspunsurile folosesc `OP_OK` sau `OP_ERROR` si payload text.
-
-## 7. Fluxuri FCE
-
-### Upload Schema ER
-
-1. Clientul trimite `OP_CONNECT`.
-2. Serverul raspunde cu `client_id`.
-3. Clientul trimite `OP_UPLOAD_BEGIN`.
-4. Clientul trimite unul sau mai multe mesaje `OP_UPLOAD_CHUNK`.
-5. Clientul trimite `OP_UPLOAD_END`.
-6. Serverul parseaza JSON-ul si incarca tabelele in `SharedState`.
-7. Serverul raspunde cu `OP_OK` sau `OP_ERROR`.
-
-### Generare SQL
-
-1. Clientul trimite `OP_GENERATE_SQL`.
-2. Serverul citeste modelul ER din starea partajata.
-3. Serverul construieste textul `CREATE TABLE`.
-4. Clientul primeste SQL-ul generat.
-
-### Validare Insert
-
-1. Clientul trimite `OP_VALIDATE_INSERT` cu batch-ul SQL.
-2. Serverul pune cererea in coada FIFO.
-3. Worker-ul scoate cererea din coada.
-4. Serverul creeaza proces copil cu `fork()`.
-5. Copilul valideaza batch-ul pe starea partajata.
-6. Parintele asteapta cu `waitpid()`.
-7. Daca validarea reuseste, parintele aplica randurile in `SharedState`.
-8. Serverul raspunde cu succes sau eroarea de constraint.
-
-### Administrare
-
-1. Adminul se conecteaza la portul admin.
-2. Trimite `OP_ADMIN_LOGIN`.
-3. Trimite `OP_ADMIN_REPORT` cu una dintre categoriile `clients`, `commands`, `avg`, `history`, `tables`, `queue`.
-4. Serverul intoarce raport text.
-5. La inactivitate peste timeout, serverul inchide conexiunea.
-
-## 8. Configurare, CLI Si Mediu
-
-Serverul citeste configuratia in aceasta ordine:
-
-1. valori implicite din cod;
-2. fisier libconfig, implicit `config.cfg`;
-3. variabile de mediu;
-4. argumente CLI.
-
-Fisier libconfig:
-
-```cfg
-server: {
-    port = 18081;
-    admin_port = 18082;
-    admin_timeout = 60;
-};
-```
-
-Variabile de mediu:
-
-- `CONFIG_PATH`: cale alternativa pentru fisierul de configurare;
-- `SERVER_PORT`: port clienti ordinari;
-- `ADMIN_PORT`: port admin;
-- `ADMIN_TIMEOUT`: timeout admin in secunde.
-
-Argumente server:
-
-```sh
-./server --config config.cfg --port 18081 --admin-port 18082 --admin-timeout 60
-```
-
-Argumente client:
-
-```sh
-./client --host 127.0.0.1 --port 18081 --input examples/er_schema.json --generate --insert-file examples/inserts_ok.sql --no-repl
-```
-
-Argumente admin:
-
-```sh
-./admin --host 127.0.0.1 --port 18082
-```
-
-## 9. Specificatie OpenAPI
-
-Protocolul implementat in Milestone 1 este binar peste TCP. Pentru cerinta de specificatii S/R/proto si pentru o eventuala extensie Web Service, documentul `docs/openapi.yaml` descrie o interfata HTTP/WS echivalenta:
-
-- upload schema ER;
-- generare SQL;
-- validare insert;
-- rapoarte admin;
-- stream WebSocket pentru operatii bazate pe aceleasi `op_id`.
-
-Aceasta specificatie este documentatie de proiect pentru nivelul Web Service; executabilele curente folosesc protocolul TCP descris mai sus.
-
-## 10. Limitari Asumate
-
-- JSON-ul ER acceptat este formatul din `examples/er_schema.json`.
-- Parserul JSON este minimal si orientat pe demo.
-- Parserul SQL accepta `INSERT INTO table [(cols...)] VALUES (...), (...);`.
-- Starea demonstrativa are limite fixe: 32 tabele, 32 coloane/tabel, 1024 randuri/tabel.
-- Autentificarea admin foloseste token static `admin`, suficient pentru demo-ul Milestone 1.
-
-## 11. Livrabile Milestone 1
-
-- SRS/SDD: `docs/SRS.md` si `docs/SDD.md`.
-- Specificatie OpenAPI: `docs/openapi.yaml`.
-- Demo practic: `server`, `client`, `admin`, `examples/er_schema.json`, `examples/inserts_ok.sql`, `examples/inserts_fail_fk.sql`, `examples/inserts_fail_unique.sql`.
-- Integrare lib externa: libconfig si ncurses. Makefile-ul activeaza libconfig cand biblioteca este instalata; local exista fallback pentru build in lipsa headerului.
-- Folosire apeluri sistem: socket-uri, `poll`, `mmap`, `fork`, `waitpid`, pipe, thread worker.
+- Admin finalizat: rapoarte 1-6 plus operatii active de nivel B.
+- IN peste pragul de 70%: conectare, upload, generare, download, validare, aplicare, erori, inchidere, client alternativ.
+- Transfer bidirectional: schema client -> server si SQL generat server -> client.
+- Coada de procesare: `RequestQueue` cu mutex si condition variable.
+- Job tracking: `QUEUED`, `RUNNING`, `DONE`, `ERROR`, cu acces la status si rezultat.
+- Logging: `logs/server.log`.
+- Procesare INSERT: cate un proces copil pentru fiecare batch, cu starea tabelelor in memorie partajata `mmap`.
+- Biblioteci externe de procesare: `cJSON` si `libpg_query`.
+- SRS imbunatatit fata de Milestone 1: include operatiile admin active, clientul Python si transferul bidirectional.

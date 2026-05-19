@@ -1,0 +1,29 @@
+[1779206140] server starting
+[1779206140] server listening ordinary=19107 admin=19108
+[1779206145] ordinary client accepted ip=127.0.0.1
+[1779206151] job queued id=1 client=1 op=12
+[1779206151] job update id=1 status=RUNNING
+[1779206151] job update id=1 status=DONE
+[1779206151] job queued id=2 client=1 op=20
+[1779206151] job update id=2 status=RUNNING
+[1779206151] job update id=2 status=DONE
+[1779206151] job queued id=3 client=1 op=30
+[1779206151] job update id=3 status=RUNNING
+[1779206151] job update id=3 status=DONE
+[1779206156] admin client accepted
+[1779206159] server stopped
+[1779206167] server starting
+[1779206167] server listening ordinary=19109 admin=19110
+[1779206174] admin client accepted
+[1779206174] ordinary client accepted ip=127.0.0.1
+[1779206174] job queued id=1 client=1 op=12
+[1779206174] job update id=1 status=RUNNING
+[1779206174] job update id=1 status=DONE
+[1779206174] job queued id=2 client=1 op=20
+[1779206174] job update id=2 status=RUNNING
+[1779206174] job update id=2 status=DONE
+[1779206174] job queued id=3 client=1 op=30
+[1779206174] job update id=3 status=RUNNING
+[1779206175] job update id=3 status=DONE
+[1779206178] admin client accepted
+[1779206182] server stopped

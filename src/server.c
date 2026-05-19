@@ -13,9 +13,11 @@
 
 #include <arpa/inet.h>  /* inet_ntop si structuri pentru adrese IPv4 */
 #include <errno.h>      /* errno si coduri de eroare */
+#include <fcntl.h>      /* open pentru fisiere temporare */
 #include <poll.h>       /* multiplexare I/O cu poll */
 #include <pthread.h>    /* thread worker si sincronizare */
 #include <signal.h>     /* ignorarea SIGPIPE */
+#include <stdarg.h>     /* argumente variadice pentru logging */
 #include <stdio.h>      /* functii standard de intrare/iesire */
 #include <stdlib.h>     /* alocare dinamica si conversii */
 #include <string.h>     /* manipulare siruri si memorie */
@@ -28,7 +30,7 @@
 #include <time.h>       /* time pentru timestamp-uri */
 #include <unistd.h>     /* close, pipe, fork, read, _exit */
 
-#ifdef HAVE_LIBCONFIG
+#ifdef HAVE_LIBCONFIG 
 #include <libconfig.h>
 #endif
 
@@ -37,6 +39,10 @@
 
 /* timpul implicit dupa care conexiunea admin inactiva este inchisa */
 #define DEFAULT_ADMIN_TIMEOUT_SEC 60
+
+/* numarul maxim de adrese memorate pentru clienti in handshake si blocklist */
+#define MAX_ADDR_TRACK 128
+#define MAX_BLOCKED_ADDR 32
 
 /*
  * configuratia efectiva a serverului dupa combinarea valorilor implicite,
@@ -57,6 +63,7 @@ typedef struct Request {
     int fd;                  /* socketul clientului care asteapta raspuns */
     uint32_t client_id;      /* identificatorul logic al clientului */
     uint32_t op_id;          /* operatia ceruta */
+    int job_id;              /* id-ul procesarii asociate, 0 pentru operatii auxiliare */
     char *payload;           /* continutul mesajului primit */
     uint32_t payload_size;   /* dimensiunea payload-ului */
     struct Request *next;    /* urmatorul element din lista inlantuita */
@@ -73,9 +80,62 @@ typedef struct {
     pthread_cond_t cond;       /* trezeste worker-ul cand apare o cerere */
 } RequestQueue;
 
+typedef struct {
+    int fd;                    /* descriptorul conexiunii */
+    char addr[64];             /* adresa IP asociata descriptorului */
+} FdAddress;
+
 static SharedState *g_state;  /* starea comuna a serverului */
 static RequestQueue g_queue;  /* coada de cereri pentru worker */
 static RuntimeConfig g_cfg;   /* configuratia runtime a serverului */
+static FdAddress g_fd_addrs[MAX_ADDR_TRACK];       /* IP-uri pentru conexiuni in handshake */
+static char g_blocked_addrs[MAX_BLOCKED_ADDR][64]; /* IP-uri/domenii blocate de admin */
+static int g_blocked_count;                        /* dimensiunea listei de blocare */
+static volatile sig_atomic_t g_running = 1;         /* controleaza oprirea curata a serverului */
+static int g_log_fd = -1;                           /* fisierul de logging al serverului */
+static pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * handler minimal de semnal, foloseste doar tip async-signal-safe
+ */
+static void handle_stop_signal(int signo) {
+    (void)signo;
+    g_running = 0;
+}
+
+/*
+ * scrie un eveniment in logs/server.log si il ignora daca logul nu este deschis
+ */
+static void log_event(const char *fmt, ...) {
+    if (g_log_fd < 0) {
+        return;
+    }
+
+    char line[1024];
+    time_t now = time(NULL);
+    int written = snprintf(line, sizeof(line), "[%ld] ", (long)now);
+    if (written < 0 || (size_t)written >= sizeof(line)) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    int body = vsnprintf(line + written, sizeof(line) - (size_t)written, fmt, args);
+    va_end(args);
+    if (body < 0) {
+        return;
+    }
+
+    size_t used = strlen(line);
+    if (used + 1 < sizeof(line)) {
+        line[used++] = '\n';
+        line[used] = '\0';
+    }
+
+    pthread_mutex_lock(&g_log_mutex);
+    write_full(g_log_fd, line, used);
+    pthread_mutex_unlock(&g_log_mutex);
+}
 
 /*
  * afiseaza optiunile acceptate de server la pornire
@@ -300,8 +360,10 @@ static int cfg_load(RuntimeConfig *cfg, int argc, char **argv) {
 static long now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return tv.tv_sec * 1000L + tv.tv_usec / 1000L;
+    return (tv.tv_sec * 1000L) + (tv.tv_usec / 1000L);
 }
+
+static void respond_text(int fd, uint32_t client_id, uint32_t op, const char *text);
 
 /*
  * adauga o linie in istoricul circular al serverului
@@ -310,6 +372,94 @@ static void history_add(const char *line) {
     int idx = g_state->history_count % MAX_HISTORY;
     snprintf(g_state->history[idx], MAX_COMMAND, "%s", line);
     g_state->history_count++;
+}
+
+static int is_processing_op(uint32_t op_id) {
+    return op_id == OP_UPLOAD_END ||
+           op_id == OP_GENERATE_SQL ||
+           op_id == OP_DOWNLOAD_SQL ||
+           op_id == OP_VALIDATE_INSERT;
+}
+
+static JobInfo *job_find(int job_id) {
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (g_state->jobs[i].job_id == job_id) {
+            return &g_state->jobs[i];
+        }
+    }
+    return NULL;
+}
+
+static int job_create(uint32_t client_id, uint32_t op_id) {
+    int job_id = g_state->next_job_id++;
+    int slot = job_id % MAX_JOBS;
+    JobInfo *job = &g_state->jobs[slot];
+    memset(job, 0, sizeof(*job));
+    job->job_id = job_id;
+    job->client_id = (int)client_id;
+    job->op_id = (int)op_id;
+    snprintf(job->status, sizeof(job->status), "QUEUED");
+    snprintf(job->result, sizeof(job->result), "queued");
+    job->queued_at = time(NULL);
+    if (client_id < 128) {
+        g_state->last_job_by_client[client_id] = job_id;
+    }
+    log_event("job queued id=%d client=%u op=%u", job_id, client_id, op_id);
+    return job_id;
+}
+
+static void job_update(int job_id, const char *status, const char *result) {
+    JobInfo *job = job_find(job_id);
+    if (job == NULL) {
+        return;
+    }
+    snprintf(job->status, sizeof(job->status), "%s", status);
+    if (result != NULL) {
+        snprintf(job->result, sizeof(job->result), "%s", result);
+    }
+    if (strcmp(status, "RUNNING") == 0) {
+        job->started_at = time(NULL);
+    } else if (strcmp(status, "DONE") == 0 || strcmp(status, "ERROR") == 0) {
+        job->finished_at = time(NULL);
+    }
+    log_event("job update id=%d status=%s", job_id, status);
+}
+
+static int parse_job_id_payload(uint32_t client_id, const char *payload) {
+    if (payload == NULL || payload[0] == '\0' || strcmp(payload, "last") == 0) {
+        return client_id < 128 ? g_state->last_job_by_client[client_id] : 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(payload, &end, 10);
+    if (errno != 0 || end == payload || *end != '\0' || parsed <= 0 || parsed > 1000000000L) {
+        return -1;
+    }
+    return (int)parsed;
+}
+
+static void respond_job_info(int fd, uint32_t client_id, uint32_t op_id, const char *payload) {
+    int job_id = parse_job_id_payload(client_id, payload);
+    if (job_id <= 0) {
+        respond_text(fd, client_id, OP_ERROR, "invalid or missing job id");
+        return;
+    }
+    JobInfo *job = job_find(job_id);
+    if (job == NULL || job->client_id != (int)client_id) {
+        respond_text(fd, client_id, OP_ERROR, "job not found");
+        return;
+    }
+
+    char response[4096];
+    if (op_id == OP_JOB_STATUS) {
+        snprintf(response, sizeof(response), "job=%d status=%s op=%d queued=%ld started=%ld finished=%ld",
+                 job->job_id, job->status, job->op_id,
+                 job->queued_at, job->started_at, job->finished_at);
+    } else {
+        snprintf(response, sizeof(response), "job=%d status=%s\n%s",
+                 job->job_id, job->status, job->result);
+    }
+    respond_text(fd, client_id, OP_OK, response);
 }
 
 /*
@@ -341,13 +491,88 @@ static void queue_push(RequestQueue *q, Request *r) {
 }
 
 /*
+ * memoreaza adresa IP pentru un descriptor pana cand clientul trimite CONNECT
+ */
+static void fd_addr_set(int fd, const char *addr) {
+    for (int i = 0; i < MAX_ADDR_TRACK; i++) {
+        if (g_fd_addrs[i].fd == 0 || g_fd_addrs[i].fd == fd) {
+            g_fd_addrs[i].fd = fd;
+            snprintf(g_fd_addrs[i].addr, sizeof(g_fd_addrs[i].addr), "%s", addr);
+            return;
+        }
+    }
+}
+
+/*
+ * returneaza adresa asociata descriptorului sau "client" daca nu exista
+ */
+static const char *fd_addr_get(int fd) {
+    for (int i = 0; i < MAX_ADDR_TRACK; i++) {
+        if (g_fd_addrs[i].fd == fd) {
+            return g_fd_addrs[i].addr;
+        }
+    }
+    return "client";
+}
+
+/*
+ * sterge descriptorul din tabela auxiliara de adrese
+ */
+static void fd_addr_remove(int fd) {
+    for (int i = 0; i < MAX_ADDR_TRACK; i++) {
+        if (g_fd_addrs[i].fd == fd) {
+            memset(&g_fd_addrs[i], 0, sizeof(g_fd_addrs[i]));
+            return;
+        }
+    }
+}
+
+/*
+ * verifica daca accesul dinspre adresa data este blocat de administrator
+ */
+static int addr_blocked(const char *addr) {
+    for (int i = 0; i < g_blocked_count; i++) {
+        if (strcmp(g_blocked_addrs[i], addr) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * adauga o adresa in blocklist, evitand duplicatele
+ */
+static int block_addr(const char *addr, char *out, size_t out_len) {
+    if (addr == NULL || addr[0] == '\0') {
+        snprintf(out, out_len, "missing address");
+        return -1;
+    }
+    if (addr_blocked(addr)) {
+        snprintf(out, out_len, "address already blocked: %s", addr);
+        return 0;
+    }
+    if (g_blocked_count >= MAX_BLOCKED_ADDR) {
+        snprintf(out, out_len, "blocked address list is full");
+        return -1;
+    }
+    snprintf(g_blocked_addrs[g_blocked_count], sizeof(g_blocked_addrs[g_blocked_count]), "%s", addr);
+    g_blocked_count++;
+    snprintf(out, out_len, "blocked address: %s", addr);
+    return 0;
+}
+
+/*
  * extrage prima cerere din coada
  * daca nu exista cereri, worker-ul asteapta pe variabila conditionala
  */
 static Request *queue_pop(RequestQueue *q) {
     pthread_mutex_lock(&q->mutex);
-    while (q->head == NULL) {
+    while (q->head == NULL && g_running) {
         pthread_cond_wait(&q->cond, &q->mutex);
+    }
+    if (q->head == NULL) {
+        pthread_mutex_unlock(&q->mutex);
+        return NULL;
     }
     Request *r = q->head;
     q->head = r->next;
@@ -415,22 +640,21 @@ static int append_upload_chunk(uint32_t client_id, const char *payload, uint32_t
     /* fiecare client scrie intr-un fisier temporar separat */
     upload_path(client_id, path, sizeof(path));
 
-    /* deschidem fisierul in mod append binar, deoarece upload-ul vine pe bucati */
-    FILE *f = fopen(path, "ab");
-    if (f == NULL) {
+    /* deschidem fisierul in append folosind apeluri sistem POSIX */
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0664);
+    if (fd < 0) {
         snprintf(err, err_len, "cannot append upload file: %s", strerror(errno));
         return -1;
     }
 
     /* scriem doar daca payload-ul are continut */
-    if (size > 0 && fwrite(payload, 1, size, f) != size) {
-        fclose(f);
-        snprintf(err, err_len, "cannot write upload chunk");
+    if (size > 0 && write_full(fd, payload, size) < 0) {
+        close(fd);
+        snprintf(err, err_len, "cannot write upload chunk: %s", strerror(errno));
         return -1;
     }
 
-    /* inchidem fisierul dupa fiecare bucata pentru a nu tine descriptorul deschis */
-    fclose(f);
+    close(fd);
     snprintf(err, err_len, "OK: chunk stored (%u bytes)", size);
     return 0;
 }
@@ -472,7 +696,13 @@ static int child_validate_insert(const char *sql, char *out, size_t out_len) {
     ssize_t n = read(pipefd[0], packet, sizeof(packet) - 1);
     close(pipefd[0]);
     int status = 0;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        snprintf(out, out_len, "waitpid failed");
+        return -1;
+    }
     if (n <= 0) {
         snprintf(out, out_len, "child did not return validation result");
         return -1;
@@ -485,6 +715,75 @@ static int child_validate_insert(const char *sql, char *out, size_t out_len) {
 }
 
 /*
+ * genereaza SQL intr-un fisier temporar si il transmite clientului pe bucati
+ */
+static int send_generated_sql_file(int fd, uint32_t client_id, char *err, size_t err_len) {
+    char sql[65536];
+    generate_sql(g_state, sql, sizeof(sql));
+
+    char path[128];
+    snprintf(path, sizeof(path), "data/generated_%u.sql", client_id);
+
+    int out_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0664);
+    if (out_fd < 0) {
+        snprintf(err, err_len, "cannot create generated SQL file: %s", strerror(errno));
+        return -1;
+    }
+
+    size_t sql_len = strlen(sql);
+    if (write_full(out_fd, sql, sql_len) < 0) {
+        close(out_fd);
+        snprintf(err, err_len, "cannot write generated SQL file: %s", strerror(errno));
+        return -1;
+    }
+    close(out_fd);
+
+    int in_fd = open(path, O_RDONLY);
+    if (in_fd < 0) {
+        snprintf(err, err_len, "cannot reopen generated SQL file: %s", strerror(errno));
+        return -1;
+    }
+
+    char begin[160];
+    snprintf(begin, sizeof(begin), "generated_%u.sql\n%zu", client_id, sql_len);
+    if (send_message(fd, client_id, OP_DOWNLOAD_BEGIN, begin, (uint32_t)strlen(begin)) < 0) {
+        close(in_fd);
+        snprintf(err, err_len, "cannot send download begin");
+        return -1;
+    }
+
+    char buf[SQLCG_FILE_CHUNK];
+    for (;;) {
+        ssize_t n = read(in_fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(in_fd);
+            snprintf(err, err_len, "cannot read generated SQL file: %s", strerror(errno));
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        if (send_message(fd, client_id, OP_DOWNLOAD_CHUNK, buf, (uint32_t)n) < 0) {
+            close(in_fd);
+            snprintf(err, err_len, "cannot send download chunk");
+            return -1;
+        }
+    }
+
+    close(in_fd);
+    if (send_message(fd, client_id, OP_DOWNLOAD_END, "OK", 2) < 0) {
+        snprintf(err, err_len, "cannot send download end");
+        return -1;
+    }
+
+    snprintf(err, err_len, "OK: generated SQL downloaded (%zu bytes)", sql_len);
+    return 0;
+}
+
+/*
  * proceseaza o cerere obisnuita din coada si trimite raspunsul catre client
  */
 static void process_request(Request *r) {
@@ -492,6 +791,7 @@ static void process_request(Request *r) {
     long start = now_ms();
     char response[65536];
     char err[2048];
+    int response_sent = 0;
 
     /* initializam buffer-ele ca siruri goale */
     response[0] = '\0';
@@ -500,17 +800,32 @@ static void process_request(Request *r) {
 
     /* marcam activitatea clientului inainte de procesarea cererii */
     client_touch(r->client_id);
+    g_state->active_client_id = (int)r->client_id;
+    g_state->active_op_id = (int)r->op_id;
+    g_state->active_started_at = time(NULL);
+    if (r->job_id > 0) {
+        job_update(r->job_id, "RUNNING", "running");
+    }
+
+    if (g_state->cancel_client_id == (int)r->client_id) {
+        snprintf(response, sizeof(response), "command cancelled by admin");
+        resp_op = OP_ERROR;
+        g_state->cancelled_commands++;
+        g_state->cancel_client_id = 0;
+        history_add("command cancelled");
+        goto finish_request;
+    }
 
     if (r->op_id == OP_UPLOAD_BEGIN) {
         /* pregatim fisierul temporar in care vor fi scrise chunk-urile JSON */
         char path[128];
         upload_path(r->client_id, path, sizeof(path));
-        FILE *f = fopen(path, "wb");
-        if (f == NULL) {
+        int upload_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0664);
+        if (upload_fd < 0) {
             snprintf(response, sizeof(response), "cannot create upload file: %s", strerror(errno));
             resp_op = OP_ERROR;
         } else {
-            fclose(f);
+            close(upload_fd);
             snprintf(response, sizeof(response), "OK: upload started");
         }
         history_add("upload begin");
@@ -535,6 +850,16 @@ static void process_request(Request *r) {
         /* generam DDL pentru schema curenta */
         generate_sql(g_state, response, sizeof(response));
         history_add("generate sql");
+    } else if (r->op_id == OP_DOWNLOAD_SQL) {
+        /* transfer bidirectional: serverul trimite SQL-ul generat ca fisier chunked */
+        if (send_generated_sql_file(r->fd, r->client_id, err, sizeof(err)) == 0) {
+            snprintf(response, sizeof(response), "%s", err);
+            response_sent = 1;
+            history_add("download sql");
+        } else {
+            snprintf(response, sizeof(response), "ERROR: %s", err);
+            resp_op = OP_ERROR;
+        }
     } else if (r->op_id == OP_VALIDATE_INSERT) {
         /* contorizam separat comenzile INSERT pentru raportul admin */
         g_state->insert_commands++;
@@ -565,6 +890,8 @@ static void process_request(Request *r) {
         resp_op = OP_ERROR;
     }
 
+finish_request:
+    ;
     /* actualizam statisticile comune pentru raportarea admin */
     long elapsed = now_ms() - start;
     g_state->total_commands++;
@@ -572,9 +899,26 @@ static void process_request(Request *r) {
     if (resp_op == OP_ERROR) {
         g_state->failed_commands++;
     }
+    if (r->job_id > 0) {
+        job_update(r->job_id, resp_op == OP_OK ? "DONE" : "ERROR", response);
+    }
 
     /* trimitem inapoi fie OP_OK, fie OP_ERROR, impreuna cu textul rezultat */
-    respond_text(r->fd, r->client_id, resp_op, response);
+    if (!response_sent) {
+        char wire_response[67584];
+        if (r->job_id > 0) {
+            snprintf(wire_response, sizeof(wire_response), "job=%d\n%s", r->job_id, response);
+            respond_text(r->fd, r->client_id, resp_op, wire_response);
+        } else {
+            respond_text(r->fd, r->client_id, resp_op, response);
+        }
+    }
+    if (g_state->active_client_id == (int)r->client_id &&
+        g_state->active_op_id == (int)r->op_id) {
+        g_state->active_client_id = 0;
+        g_state->active_op_id = 0;
+        g_state->active_started_at = 0;
+    }
 }
 
 /*
@@ -583,8 +927,11 @@ static void process_request(Request *r) {
  */
 static void *worker_main(void *arg) {
     (void)arg;
-    for (;;) {
+    while (g_running) {
         Request *r = queue_pop(&g_queue);
+        if (r == NULL) {
+            break;
+        }
         process_request(r);
         free(r->payload);
         free(r);
@@ -599,6 +946,7 @@ static void remove_pollfd(struct pollfd *fds, int *nfds, int idx) {
     int fd = fds[idx].fd;
     close(fd);
     client_remove_fd(fd);
+    fd_addr_remove(fd);
 
     /* mutam elementele din dreapta peste pozitia eliminata */
     if (idx < *nfds - 1) {
@@ -647,12 +995,23 @@ static void accept_client(int listen_fd, struct pollfd *fds, int *nfds) {
     char ip[64];
 
     /* convertim adresa IPv4 in text pentru log si rapoarte */
-    inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+    if (inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip)) == NULL) {
+        close(fd);
+        return;
+    }
+    if (addr_blocked(ip)) {
+        respond_text(fd, 0, OP_ERROR, "access denied by admin blocklist");
+        close(fd);
+        fprintf(stderr, "blocked ordinary client from %s\n", ip);
+        return;
+    }
+    fd_addr_set(fd, ip);
     fds[*nfds].fd = fd;
     fds[*nfds].events = POLLIN;
     fds[*nfds].revents = 0;
     (*nfds)++;
     fprintf(stderr, "ordinary client connected from %s\n", ip);
+    log_event("ordinary client accepted ip=%s", ip);
 }
 
 /*
@@ -686,6 +1045,7 @@ static void accept_admin(int listen_fd, struct pollfd *fds, int *nfds, int *admi
     fds[*nfds].revents = 0;
     (*nfds)++;
     fprintf(stderr, "admin client connected\n");
+    log_event("admin client accepted");
 }
 
 /*
@@ -697,6 +1057,36 @@ static int is_registered_client(uint32_t client_id) {
             return 1;
         }
     }
+    return 0;
+}
+
+/*
+ * returneaza descriptorul asociat unui client_id activ
+ */
+static int client_fd_by_id(int client_id) {
+    for (int i = 0; i < 128; i++) {
+        if (g_state->clients[i].client_id == client_id && g_state->clients[i].fd > 0) {
+            return g_state->clients[i].fd;
+        }
+    }
+    return -1;
+}
+
+/*
+ * parseaza un id de client din payload-ul unei comenzi admin
+ */
+static int parse_client_id_payload(const char *payload, int *client_id) {
+    char *end = NULL;
+    long value;
+    if (payload == NULL) {
+        return -1;
+    }
+    errno = 0;
+    value = strtol(payload, &end, 10);
+    if (errno != 0 || end == payload || *end != '\0' || value <= 0 || value > 1000000) {
+        return -1;
+    }
+    *client_id = (int)value;
     return 0;
 }
 
@@ -727,7 +1117,209 @@ static void handle_admin_message(int fd, int *admin_fd, long *admin_last, MsgHea
         respond_text(fd, 0, OP_OK, report);
         return;
     }
+    if (h->op_id == OP_ADMIN_DISCONNECT) {
+        int client_id = 0;
+        if (parse_client_id_payload(payload, &client_id) < 0) {
+            respond_text(fd, 0, OP_ERROR, "invalid client id");
+            return;
+        }
+        int client_fd = client_fd_by_id(client_id);
+        if (client_fd < 0) {
+            respond_text(fd, 0, OP_ERROR, "client not connected");
+            return;
+        }
+        respond_text(client_fd, (uint32_t)client_id, OP_ERROR, "disconnected by admin");
+        shutdown(client_fd, SHUT_RDWR);
+        history_add("admin disconnected client");
+        respond_text(fd, 0, OP_OK, "client disconnected");
+        return;
+    }
+    if (h->op_id == OP_ADMIN_CANCEL) {
+        int client_id = 0;
+        if (parse_client_id_payload(payload, &client_id) < 0) {
+            respond_text(fd, 0, OP_ERROR, "invalid client id");
+            return;
+        }
+        if (g_state->active_client_id == client_id || client_fd_by_id(client_id) >= 0) {
+            g_state->cancel_client_id = client_id;
+            history_add("admin requested command cancel");
+            respond_text(fd, 0, OP_OK, "cancel requested");
+        } else {
+            respond_text(fd, 0, OP_ERROR, "client not connected");
+        }
+        return;
+    }
+    if (h->op_id == OP_ADMIN_BLOCK) {
+        char result[256];
+        if (block_addr(payload, result, sizeof(result)) == 0) {
+            history_add("admin blocked address");
+            respond_text(fd, 0, OP_OK, result);
+        } else {
+            respond_text(fd, 0, OP_ERROR, result);
+        }
+        return;
+    }
     respond_text(fd, 0, OP_ERROR, "unknown admin operation");
+}
+
+static void *ordinary_interface_main(void *arg) {
+    int listen_fd = *(int *)arg;
+    struct pollfd fds[MAX_FDS];
+    int nfds = 0;
+    fds[nfds++] = (struct pollfd){.fd = listen_fd, .events = POLLIN};
+
+    while (g_running) {
+        int rc = poll(fds, nfds, 1000);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("poll ordinary");
+            break;
+        }
+
+        for (int i = 0; i < nfds; i++) {
+            if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) {
+                continue;
+            }
+            if (fds[i].fd == listen_fd) {
+                accept_client(listen_fd, fds, &nfds);
+                continue;
+            }
+
+            MsgHeader h;
+            char *payload = NULL;
+            int recv_status = recv_message(fds[i].fd, &h, &payload);
+            if (recv_status <= 0) {
+                free(payload);
+                remove_pollfd(fds, &nfds, i);
+                i--;
+                continue;
+            }
+
+            if (h.op_id == OP_CONNECT) {
+                uint32_t id = (uint32_t)g_state->next_client_id++;
+                register_client(fds[i].fd, fd_addr_get(fds[i].fd), id);
+                char msg[64];
+                snprintf(msg, sizeof(msg), "%u", id);
+                respond_text(fds[i].fd, id, OP_OK, msg);
+                history_add("client connected");
+                free(payload);
+                continue;
+            }
+
+            if (h.op_id == OP_BYE) {
+                respond_text(fds[i].fd, h.client_id, OP_OK, "bye");
+                free(payload);
+                remove_pollfd(fds, &nfds, i);
+                i--;
+                continue;
+            }
+
+            if (!is_registered_client(h.client_id)) {
+                respond_text(fds[i].fd, h.client_id, OP_ERROR, "client must CONNECT first");
+                free(payload);
+                continue;
+            }
+
+            if (h.op_id == OP_JOB_STATUS || h.op_id == OP_JOB_RESULT) {
+                respond_job_info(fds[i].fd, h.client_id, h.op_id, payload);
+                free(payload);
+                continue;
+            }
+
+            Request *req = (Request *)calloc(1, sizeof(*req));
+            if (req == NULL) {
+                respond_text(fds[i].fd, h.client_id, OP_ERROR, "server out of memory");
+                free(payload);
+                continue;
+            }
+
+            req->fd = fds[i].fd;
+            req->client_id = h.client_id;
+            req->op_id = h.op_id;
+            req->payload = payload;
+            req->payload_size = h.msg_size;
+            if (is_processing_op(h.op_id)) {
+                req->job_id = job_create(h.client_id, h.op_id);
+            }
+            queue_push(&g_queue, req);
+        }
+    }
+
+    for (int i = 0; i < nfds; i++) {
+        close(fds[i].fd);
+    }
+    return NULL;
+}
+
+static void *admin_interface_main(void *arg) {
+    int listen_fd = *(int *)arg;
+    struct pollfd fds[2];
+    int nfds = 0;
+    int admin_fd = -1;
+    long admin_last = 0;
+    fds[nfds++] = (struct pollfd){.fd = listen_fd, .events = POLLIN};
+
+    while (g_running) {
+        int rc = poll(fds, nfds, 1000);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("poll admin");
+            break;
+        }
+
+        if (admin_fd > 0 && time(NULL) - admin_last > g_cfg.admin_timeout_sec) {
+            for (int i = 0; i < nfds; i++) {
+                if (fds[i].fd == admin_fd) {
+                    remove_pollfd(fds, &nfds, i);
+                    break;
+                }
+            }
+            admin_fd = -1;
+            g_state->admin_connected = 0;
+            fprintf(stderr, "admin disconnected due to timeout\n");
+            log_event("admin disconnected due to timeout");
+        }
+
+        for (int i = 0; i < nfds; i++) {
+            if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) {
+                continue;
+            }
+            if (fds[i].fd == listen_fd) {
+                accept_admin(listen_fd, fds, &nfds, &admin_fd, &admin_last);
+                continue;
+            }
+
+            MsgHeader h;
+            char *payload = NULL;
+            int recv_status = recv_message(fds[i].fd, &h, &payload);
+            if (recv_status <= 0) {
+                if (fds[i].fd == admin_fd) {
+                    admin_fd = -1;
+                    g_state->admin_connected = 0;
+                }
+                free(payload);
+                remove_pollfd(fds, &nfds, i);
+                i--;
+                continue;
+            }
+
+            handle_admin_message(fds[i].fd, &admin_fd, &admin_last, &h, payload);
+            if (admin_fd < 0) {
+                remove_pollfd(fds, &nfds, i);
+                i--;
+            }
+            free(payload);
+        }
+    }
+
+    for (int i = 0; i < nfds; i++) {
+        close(fds[i].fd);
+    }
+    return NULL;
 }
 
 /*
@@ -736,7 +1328,12 @@ static void handle_admin_message(int fd, int *admin_fd, long *admin_last, MsgHea
  */
 int main(int argc, char **argv) {
     /* evitam terminarea procesului daca scriem intr-un socket inchis */
-    signal(SIGPIPE, SIG_IGN);
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR ||
+        signal(SIGINT, handle_stop_signal) == SIG_ERR ||
+        signal(SIGTERM, handle_stop_signal) == SIG_ERR) {
+        perror("signal");
+        return 1;
+    }
 
     /* incarcam configuratia finala a serverului */
     int cfg_status = cfg_load(&g_cfg, argc, argv);
@@ -754,6 +1351,16 @@ int main(int argc, char **argv) {
         perror("mkdir data");
         return 1;
     }
+    if (mkdir("logs", 0775) < 0 && errno != EEXIST) {
+        perror("mkdir logs");
+        return 1;
+    }
+    g_log_fd = open("logs/server.log", O_WRONLY | O_CREAT | O_APPEND, 0664);
+    if (g_log_fd < 0) {
+        perror("open logs/server.log");
+        return 1;
+    }
+    log_event("server starting");
 
     /*
      * SharedState este alocat in memorie partajata pentru ca procesul copil
@@ -778,141 +1385,48 @@ int main(int argc, char **argv) {
 
     /* worker-ul proceseaza cererile obisnuite din coada */
     pthread_t worker;
-    pthread_create(&worker, NULL, worker_main, NULL);
-
-    /* vectorul poll porneste cu cele doua socketuri de ascultare */
-    struct pollfd fds[MAX_FDS];
-    int nfds = 0;
-    fds[nfds++] = (struct pollfd){.fd = listen_fd, .events = POLLIN};
-    fds[nfds++] = (struct pollfd){.fd = admin_listen_fd, .events = POLLIN};
-    int admin_fd = -1;
-    long admin_last = 0;
+    if (pthread_create(&worker, NULL, worker_main, NULL) != 0) {
+        perror("pthread_create");
+        return 1;
+    }
+    pthread_t ordinary_thread;
+    pthread_t admin_thread;
+    if (pthread_create(&ordinary_thread, NULL, ordinary_interface_main, &listen_fd) != 0) {
+        perror("pthread_create ordinary");
+        g_running = 0;
+        return 1;
+    }
+    if (pthread_create(&admin_thread, NULL, admin_interface_main, &admin_listen_fd) != 0) {
+        perror("pthread_create admin");
+        g_running = 0;
+        return 1;
+    }
 
     fprintf(stderr,
             "sql-code-generator server listening on %u, admin on %u, timeout %ds, config %s\n",
             (unsigned)g_cfg.server_port, (unsigned)g_cfg.admin_port, g_cfg.admin_timeout_sec,
             g_cfg.config_path);
+    log_event("server listening ordinary=%u admin=%u", (unsigned)g_cfg.server_port,
+              (unsigned)g_cfg.admin_port);
 
-    for (;;) {
-        int rc = poll(fds, nfds, 1000);
-        if (rc < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            perror("poll");
-            break;
-        }
-
-        /* inchidem automat conexiunea admin daca depaseste timeout-ul de inactivitate */
-        if (admin_fd > 0 && time(NULL) - admin_last > g_cfg.admin_timeout_sec) {
-            for (int i = 0; i < nfds; i++) {
-                if (fds[i].fd == admin_fd) {
-                    remove_pollfd(fds, &nfds, i);
-                    break;
-                }
-            }
-            admin_fd = -1;
-            g_state->admin_connected = 0;
-            fprintf(stderr, "admin disconnected due to timeout\n");
-        }
-
-        /* parcurgem toti descriptorii care au date de citit */
-        for (int i = 0; i < nfds; i++) {
-            if (!(fds[i].revents & POLLIN)) {
-                continue;
-            }
-
-            /* conexiune noua de client obisnuit */
-            if (fds[i].fd == listen_fd) {
-                accept_client(listen_fd, fds, &nfds);
-                continue;
-            }
-
-            /* conexiune noua de admin */
-            if (fds[i].fd == admin_listen_fd) {
-                accept_admin(admin_listen_fd, fds, &nfds, &admin_fd, &admin_last);
-                continue;
-            }
-
-            MsgHeader h;
-            char *payload = NULL;
-            int r = recv_message(fds[i].fd, &h, &payload);
-            if (r <= 0) {
-                /* conexiune inchisa sau eroare de citire */
-                if (fds[i].fd == admin_fd) {
-                    admin_fd = -1;
-                    g_state->admin_connected = 0;
-                }
-                free(payload);
-                remove_pollfd(fds, &nfds, i);
-                i--;
-                continue;
-            }
-
-            /* mesajele admin sunt procesate direct, fara coada worker */
-            if (fds[i].fd == admin_fd) {
-                handle_admin_message(fds[i].fd, &admin_fd, &admin_last, &h, payload);
-                if (admin_fd < 0) {
-                    remove_pollfd(fds, &nfds, i);
-                    i--;
-                }
-                free(payload);
-                continue;
-            }
-
-            /* primul mesaj al unui client obisnuit trebuie sa fie CONNECT */
-            if (h.op_id == OP_CONNECT) {
-                uint32_t id = (uint32_t)g_state->next_client_id++;
-                char addr[64] = "client";
-                register_client(fds[i].fd, addr, id);
-                char msg[64];
-                snprintf(msg, sizeof(msg), "%u", id);
-                respond_text(fds[i].fd, id, OP_OK, msg);
-                history_add("client connected");
-                free(payload);
-                continue;
-            }
-
-            /* BYE inchide conexiunea clientului obisnuit */
-            if (h.op_id == OP_BYE) {
-                respond_text(fds[i].fd, h.client_id, OP_OK, "bye");
-                free(payload);
-                remove_pollfd(fds, &nfds, i);
-                i--;
-                continue;
-            }
-
-            /* orice alta operatie necesita un client_id inregistrat anterior */
-            if (!is_registered_client(h.client_id)) {
-                respond_text(fds[i].fd, h.client_id, OP_ERROR, "client must CONNECT first");
-                free(payload);
-                continue;
-            }
-
-            /* mesajul valid este impachetat ca Request si preluat de worker */
-            Request *req = (Request *)calloc(1, sizeof(*req));
-            if (req == NULL) {
-                /* daca nu putem aloca cererea, raspundem imediat cu eroare */
-                respond_text(fds[i].fd, h.client_id, OP_ERROR, "server out of memory");
-                free(payload);
-                continue;
-            }
-
-            /* transferam ownership-ul payload-ului catre Request */
-            req->fd = fds[i].fd;
-            req->client_id = h.client_id;
-            req->op_id = h.op_id;
-            req->payload = payload;
-            req->payload_size = h.msg_size;
-
-            /* de aici cererea va fi procesata asincron de worker */
-            queue_push(&g_queue, req);
-        }
+    while (g_running) {
+        sleep(1);
     }
 
-    /* inchidem socketurile de ascultare la iesirea din bucla principala */
-    close(listen_fd);
-    close(admin_listen_fd);
+    pthread_join(ordinary_thread, NULL);
+    pthread_join(admin_thread, NULL);
+    pthread_mutex_lock(&g_queue.mutex);
+    pthread_cond_broadcast(&g_queue.cond);
+    pthread_mutex_unlock(&g_queue.mutex);
+    pthread_join(worker, NULL);
+
+    pthread_cond_destroy(&g_queue.cond);
+    pthread_mutex_destroy(&g_queue.mutex);
+    log_event("server stopped");
+    if (g_log_fd >= 0) {
+        close(g_log_fd);
+    }
+    pthread_mutex_destroy(&g_log_mutex);
     return 0;
 }
 

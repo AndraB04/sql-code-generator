@@ -26,10 +26,10 @@
 #define SQLCG_ADMIN_PORT 18082
 
 /* dimensiunea maxima acceptata pentru payload-ul unui mesaj */
-#define SQLCG_MAX_PAYLOAD (1024u * 1024u)
+#define SQLCG_MAX_PAYLOAD (1024ul * 1024ul)
 
 /* dimensiunea unui bloc de date transmis la upload de fisier */
-#define SQLCG_FILE_CHUNK (64u * 1024u)
+#define SQLCG_FILE_CHUNK (64ul * 1024ul)
 
 /* enumerare cu identificatorii operatiilor suportate de protocol */
 enum {
@@ -39,15 +39,24 @@ enum {
     OP_UPLOAD_BEGIN = 10,    /* inceputul operatiei de upload */
     OP_UPLOAD_CHUNK = 11,    /* trimiterea unui bloc din fisier */
     OP_UPLOAD_END = 12,      /* finalizarea operatiei de upload */
+    OP_DOWNLOAD_BEGIN = 13,  /* inceputul transferului server -> client */
+    OP_DOWNLOAD_CHUNK = 14,  /* bloc de fisier trimis de server */
+    OP_DOWNLOAD_END = 15,    /* finalizarea transferului server -> client */
 
     OP_GENERATE_SQL = 20,    /* cerere pentru generarea codului SQL */
+    OP_DOWNLOAD_SQL = 21,    /* cerere pentru descarcarea SQL generat ca fisier */
     OP_VALIDATE_INSERT = 30, /* cerere pentru validarea unei instructiuni INSERT */
+    OP_JOB_STATUS = 31,      /* cere starea unei procesari */
+    OP_JOB_RESULT = 32,      /* cere rezultatul memorat al unei procesari */
 
     OP_OK = 40,              /* raspuns care indica succes */
     OP_ERROR = 41,           /* raspuns care indica eroare */
 
     OP_ADMIN_LOGIN = 100,    /* autentificare in modul admin */
     OP_ADMIN_REPORT = 101,   /* cerere pentru raport/statistici admin */
+    OP_ADMIN_DISCONNECT = 102, /* deconectarea fortata a unui client */
+    OP_ADMIN_CANCEL = 103,   /* anularea comenzii curente a unui client */
+    OP_ADMIN_BLOCK = 104,    /* blocarea accesului dinspre un IP/domeniu */
     OP_ADMIN_BYE = 105       /* inchiderea conexiunii admin */
 };
 
