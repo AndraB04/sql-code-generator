@@ -27,3 +27,81 @@
 [1779206175] job update id=3 status=DONE
 [1779206178] admin client accepted
 [1779206182] server stopped
+[1779206580] server starting
+[1779206580] server listening ordinary=18081 admin=18082
+[1779206585] server starting
+[1779206586] server listening ordinary=18081 admin=18082
+[1779206592] ordinary client accepted ip=127.0.0.1
+[1779206605] job queued id=1 client=1 op=12
+[1779206605] job update id=1 status=RUNNING
+[1779206605] job update id=1 status=DONE
+[1779206605] job queued id=2 client=1 op=20
+[1779206605] job update id=2 status=RUNNING
+[1779206605] job update id=2 status=DONE
+[1779206605] job queued id=3 client=1 op=21
+[1779206605] job update id=3 status=RUNNING
+[1779206605] job update id=3 status=DONE
+[1779206605] job queued id=4 client=1 op=30
+[1779206605] job update id=4 status=RUNNING
+[1779206605] job update id=4 status=DONE
+[1779206606] job queued id=5 client=1 op=30
+[1779206606] job update id=5 status=RUNNING
+[1779206606] job update id=5 status=ERROR
+[1779206607] ordinary client accepted ip=127.0.0.1
+[1779206608] job queued id=6 client=2 op=12
+[1779206608] job update id=6 status=RUNNING
+[1779206608] job update id=6 status=DONE
+[1779206608] job queued id=7 client=2 op=20
+[1779206608] job update id=7 status=RUNNING
+[1779206608] job update id=7 status=DONE
+[1779206608] job queued id=8 client=2 op=21
+[1779206608] job update id=8 status=RUNNING
+[1779206608] job update id=8 status=DONE
+[1779206609] job queued id=9 client=2 op=30
+[1779206609] job update id=9 status=RUNNING
+[1779206609] job update id=9 status=DONE
+[1779206609] job queued id=10 client=2 op=30
+[1779206609] job update id=10 status=RUNNING
+[1779206609] job update id=10 status=ERROR
+[1779206635] ordinary client accepted ip=127.0.0.1
+[1779206635] job queued id=11 client=3 op=12
+[1779206635] job update id=11 status=RUNNING
+[1779206635] job update id=11 status=DONE
+[1779206635] job queued id=12 client=3 op=20
+[1779206635] job update id=12 status=RUNNING
+[1779206635] job update id=12 status=DONE
+[1779206635] job queued id=13 client=3 op=21
+[1779206635] job update id=13 status=RUNNING
+[1779206635] job update id=13 status=DONE
+[1779206635] job queued id=14 client=3 op=30
+[1779206635] job update id=14 status=RUNNING
+[1779206635] job update id=14 status=DONE
+[1779206641] ordinary client accepted ip=127.0.0.1
+[1779206641] job queued id=15 client=4 op=12
+[1779206641] job update id=15 status=RUNNING
+[1779206641] job update id=15 status=DONE
+[1779206641] job queued id=16 client=4 op=30
+[1779206641] job update id=16 status=RUNNING
+[1779206641] job update id=16 status=ERROR
+[1779206646] ordinary client accepted ip=127.0.0.1
+[1779206646] job queued id=17 client=5 op=12
+[1779206646] job update id=17 status=RUNNING
+[1779206646] job update id=17 status=DONE
+[1779206646] job queued id=18 client=5 op=20
+[1779206646] job update id=18 status=RUNNING
+[1779206646] job update id=18 status=DONE
+[1779206646] job queued id=19 client=5 op=21
+[1779206646] job update id=19 status=RUNNING
+[1779206646] job update id=19 status=DONE
+[1779206646] job queued id=20 client=5 op=30
+[1779206646] job update id=20 status=RUNNING
+[1779206646] job update id=20 status=DONE
+[1779206657] admin client accepted
+[1779206737] admin disconnected due to timeout
+[1779207389] job queued id=21 client=2 op=21
+[1779207389] job update id=21 status=RUNNING
+[1779207389] job update id=21 status=DONE
+[1779207402] job queued id=22 client=2 op=12
+[1779207402] job update id=22 status=RUNNING
+[1779207402] job update id=22 status=DONE
+[1779208203] server stopped

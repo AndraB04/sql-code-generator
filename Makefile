@@ -87,13 +87,16 @@ memcheck: server
 helgrind: server
 	valgrind --tool=helgrind --child-silent-after-fork=yes ./server
 
-# valideaza prezenta documentatiei sursa pentru Milestone 2
-docs: docs/SRS.md docs/SDD.md docs/SRS.pdf docs/SDD.pdf
-	@echo "Documentation sources and exported PDFs are present."
+# genereaza PDF-urile documentatiei pentru Milestone 2 din sursele Markdown
+docs: docs/SRS.pdf docs/SDD.pdf
+	@echo "Documentation PDFs generated."
+
+docs/%.pdf: docs/%.md tools/md_to_pdf.py
+	python3 tools/md_to_pdf.py $< $@
 
 # sterge fisierele auxiliare generate de pdflatex
 clean-docs:
-	rm -f docs/*.aux docs/*.log docs/*.out docs/*.toc
+	rm -f docs/*.aux docs/*.log docs/*.out docs/*.toc docs/*.tex
 
 # sterge executabilele si fisierele temporare create la upload
 clean:
@@ -101,6 +104,6 @@ clean:
 	rm -f data/upload_*.schema.json
 	rm -f data/generated_*.sql
 	rm -f logs/server.log
-	rm -f docs/*.aux docs/*.log docs/*.out docs/*.toc
+	rm -f docs/*.aux docs/*.log docs/*.out docs/*.toc docs/*.tex
 
 # rularea se face cu make all
